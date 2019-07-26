@@ -3,6 +3,7 @@ from torch.utils import data
 import numpy as np
 import json
 from tqdm import tqdm_notebook as tqdm
+#from tqdm import tqdm
 
 class Dataset(data.Dataset):    
     def __init__(self, data_name, INPUT_MAX, OUTPUT_MAX, pad_idx, cutoff=None):
@@ -18,26 +19,38 @@ class Dataset(data.Dataset):
         # idata -> list
         self.size = len(sum_list)
         self.sum_len = 0
-        self.documents = []
-        self.summaries = []
         
-        for i in tqdm(range(len(sum_list))):
-            if(len(data_list[i]) <= INPUT_MAX):
-                data = data_list[i] + [pad_idx]*(INPUT_MAX-len(data_list[i]))
-            else:
-                data = data_list[i][:INPUT_MAX]
-                
-            if(len(sum_list[i]) <= OUTPUT_MAX):
-                sum_in = sum_list[i] + [pad_idx]*(OUTPUT_MAX-len(sum_list[i]))
-            else:
-                sum_in = sum_list[i][:OUTPUT_MAX]
-                
-            self.documents.append(data)
-            self.summaries.append(sum_in)
+        self.documents = np.full((self.size, INPUT_MAX), pad_idx, dtype=np.int64)
+        self.summaries = np.full((self.size, OUTPUT_MAX), pad_idx, dtype=np.int64)
+        
+        for i in tqdm(range(self.size)):
+            src = data_list[i]
+            tgt = sum_list[i]
+            cp_src = min(len(src), INPUT_MAX)
+            cp_tgt = min(len(tgt), OUTPUT_MAX)
+            
+            self.documents[i,:cp_src] = src[:cp_src]
+            self.summaries[i,:cp_tgt] = tgt[:cp_tgt]
+        
+        #self.documents = []
+        #self.summaries = []
+        #for i in tqdm(range(len(sum_list))):
+        #    if(len(data_list[i]) <= INPUT_MAX):
+        #        data = data_list[i] + [pad_idx]*(INPUT_MAX-len(data_list[i]))
+        #    else:
+        #        data = data_list[i][:INPUT_MAX]
+        #        
+        #    if(len(sum_list[i]) <= OUTPUT_MAX):
+        #        sum_in = sum_list[i] + [pad_idx]*(OUTPUT_MAX-len(sum_list[i]))
+        #    else:
+        #        sum_in = sum_list[i][:OUTPUT_MAX]
+        #        
+        #    self.documents.append(np.asarray(data, dtype=np.int64))
+        #    self.summaries.append(np.asarray(sum_in, dtype=np.int64))
         
         # data_sz, 2, 
-        self.documents = np.asarray(self.documents, dtype=np.int64)
-        self.summaries = np.asarray(self.summaries, dtype=np.int64)
+        #self.documents = np.asarray(self.documents, dtype=np.int64)
+        #self.summaries = np.asarray(self.summaries, dtype=np.int64)
      
     def __len__(self):
         return self.size

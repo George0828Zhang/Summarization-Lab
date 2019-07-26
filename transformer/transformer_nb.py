@@ -32,6 +32,7 @@ from torch.autograd import Variable
 import matplotlib.pyplot as plt
 import seaborn
 seaborn.set_context(context="talk")
+from tqdm import tqdm_notebook as tqdm
 
 
 # Table of Contents
@@ -485,7 +486,6 @@ class Batch:
 
 # In[23]:
 
-from tqdm import tqdm_notebook as tqdm
 
 def run_epoch(data_iter, model, loss_compute, total):
     "Standard Training and Logging Function"
@@ -493,6 +493,7 @@ def run_epoch(data_iter, model, loss_compute, total):
     total_tokens = 0
     total_loss = 0
     tokens = 0
+    train_history = []
     for i, batch in tqdm(enumerate(data_iter), total=total):
         out = model.forward(batch.src, batch.trg, 
                             batch.src_mask, batch.trg_mask)
@@ -506,8 +507,9 @@ def run_epoch(data_iter, model, loss_compute, total):
 #                     (i, loss / batch.ntokens, tokens / elapsed))
 #             start = time.time()
 #             tokens = 0
+        train_history.append(loss / batch.ntokens)
         print(loss / batch.ntokens, end='\r')
-    return total_loss / total_tokens
+    return total_loss / total_tokens, train_history
 
 
 # ## Training Data and Batching
@@ -580,6 +582,9 @@ class NoamOpt:
             step = self._step
         return self.factor *             (self.model_size ** (-0.5) *
             min(step ** (-0.5), step * self.warmup ** (-1.5)))
+    
+    def zero_grad(self):
+        self.optimizer.zero_grad()
         
 def get_std_opt(model):
     return NoamOpt(model.src_embed[0].d_model, 2, 4000,
@@ -680,7 +685,7 @@ class SimpleLossCompute:
                               y.contiguous().view(-1)) / norm
         
         if self.opt is not None:
-            self.opt.optimizer.zero_grad()
+            self.opt.zero_grad()
         loss.backward()
         if self.opt is not None:
             self.opt.step()
@@ -727,6 +732,28 @@ class SimpleLossCompute:
 #         ys = torch.cat([ys, 
 #                         torch.ones(1, 1).type_as(src.data).fill_(next_word)], dim=1)
 #     return ys
+
+def greedy_decode_batch(model, src, src_mask, max_len, start_symbol):
+    batch_size = src.shape[0]
+    
+    memory = model.encode(src, src_mask)
+    ys = torch.ones(batch_size, 1).fill_(start_symbol).type_as(src.data)
+    for i in range(max_len-1):
+        out = model.decode(memory, src_mask, 
+                           Variable(ys), 
+                           Variable(subsequent_mask(ys.size(1))
+                                    .type_as(src.data)))
+        #print(out.shape) 128,1,256
+        probs = model.generator(out[:, -1, :])
+        
+        #print(probs.shape) 128,30522
+        next_words = torch.argmax(probs, dim=1, keepdim=True)
+        
+        #print(next_words.shape)        
+        #print(ys.shape) both 128,1
+        
+        ys = torch.cat((ys, next_words), dim=1)
+    return ys
 
 # model.eval()
 # src = Variable(torch.LongTensor([[1,2,3,4,5,6,7,8,9,10]]) )
