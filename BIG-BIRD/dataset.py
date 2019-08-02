@@ -11,7 +11,8 @@ class Dataset(data.Dataset):
         data = json.load(open(data_name, 'r'))
         print("load json done.")
         sum_list = data['summary']
-        data_list = data['document']
+        data_list = data['text']
+        self.scores = np.asarray(data['score'], dtype=np.float64)
         
         if cutoff is not None:
             sum_list = sum_list[:cutoff]
@@ -36,7 +37,7 @@ class Dataset(data.Dataset):
     def __len__(self):
         return self.size
     def __getitem__(self, index):
-        return torch.from_numpy(self.documents[index]), torch.from_numpy(self.summaries[index])
+        return torch.from_numpy(self.documents[index]), torch.tensor([self.scores[index]]), torch.from_numpy(self.summaries[index])
     
 def make_data_generator(data_name, in_max, out_max, padding_idx, batch_size, cutoff=None, shuffle=True, num_workers=4):    
     data_set = Dataset(data_name, in_max, out_max, padding_idx, cutoff)
