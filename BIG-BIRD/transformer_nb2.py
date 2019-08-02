@@ -213,7 +213,7 @@ class Decoder(nn.Module):
         for layer in self.layers:
             x = layer(x, memory, src_mask, tgt_mask)
         return self.norm(x)
-
+    
 
 # In addition to the two sub-layers in each encoder layer, the decoder inserts a third sub-layer, which performs multi-head attention over the output of the encoder stack.  Similar to the encoder, we employ residual connections around each of the sub-layers, followed by layer normalization.  
 
@@ -760,3 +760,246 @@ def greedy_decode(model, src, src_mask, max_len, start_symbol):
                         torch.ones(1, 1).type_as(src.data).fill_(next_word)], dim=1)
     return ys
 
+#----------------------------------------
+class BigBird():
+    #generator is translator here
+    def __init__(self, generator, discriminator, classifier, dictionary, gamma = 0.99, clip_value = 0.1, lr_G = 1e-4, lr_D = 5e-5, lr_C = 5e-5):
+        super(BigBird, self).__init__()
+        
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        self.dictionary = dictionary
+        
+        self.generator = generator.to(self.device)
+        self.classifier = classifier.to(self.device)
+        self.discriminator = discriminator.to(self.device)
+        
+        self.gamma = gamma
+        self.eps = np.finfo(np.float32).eps.item()
+        
+        self.optimizer_C = torch.optim.Adam(list(self.generator.parameters()) + list(self.classifier.parameters()), lr=lr_G)
+        self.optimizer_G = torch.optim.RMSprop(self.generator.parameters(), lr=lr_D)
+        self.optimizer_D = torch.optim.RMSprop(self.discriminator.parameters(), lr=lr_C)
+               
+        self.clip_value = clip_value
+        
+    def train_D(self, fake_datas, real_datas):
+        ## train discriminator
+                    
+        real_score = torch.mean(self.discriminator(real_datas)) 
+        fake_score = torch.mean(self.discriminator(fake_datas))
+        #print(real_loss)
+        #print(fake_loss)
+        #input("")
+        batch_d_loss = -real_score + fake_score# + gradient_penalty
+        batch_d_loss.backward();
+        
+        #Clip critic weights
+        for p in self.discriminator.parameters():
+            p.data.clamp_(-self.clip_value, self.clip_value)
+        
+        self.optimizer_D.step();
+        
+        return batch_d_loss.item(), real_score.item(), fake_score.item()
+    
+    def train_G(self, fake_datas): 
+
+        self.optimizer_G.zero_grad()
+          
+        batch_g_loss = -torch.mean(self.discriminator(fake_datas))
+        
+        batch_g_loss.backward()
+        self.optimizer_G.step()
+
+        return batch_g_loss.item()      
+        
+        
+    def compute(self, batch_rewards, saved_log_probs):
+        # TODO:
+        # discount your saved reward
+        
+        # TODO:
+        
+        cummulative_loss = 0
+        # compute loss
+        for i, reward in enumerate(batch_rewards):
+            R = reward
+            loss = []
+            returns = []
+            
+            for r in range(saved_log_probs.shape[1], 0, -1):
+                returns.insert(0, R)
+                R = self.gamma * R
+                
+            returns = torch.FloatTensor(returns).to(self.device)
+            returns = (returns - returns.mean()) / (returns.std() + self.eps)
+            #returns = torch.where(returns > 0 , returns, torch.FloatTensor([0.1] * len(returns)));
+            loss = torch.sum(torch.mul(saved_log_probs[i], returns).mul(-1), -1)
+            cummulative_loss += loss.mean()
+       
+        
+        return cummulative_loss
+    def train(self):
+        self.generator.train()
+        self.classifier.train()
+        self.discriminator.train()
+        
+    def eval(self):
+        self.generator.eval()
+        self.classifier.eval()
+        self.discriminator.eval()
+    
+    def run_iter(self, src, src_mask, max_len, real_data, sentiment_label, D_iters = 5):
+        #summary_logits have some problem
+
+        
+        summary, summary_logits = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'])
+        
+        batch_D_loss = 0
+        for i in range(D_iters):          
+            batch_d_loss, real_score, fake_score= self.train_D(summary, real_data)
+            batch_D_loss += batch_d_loss
+        
+        batch_G_loss = self.train_G(summary)
+        #assert type(summary_logits) is not list
+        loss_sample = self.classifier(torch.distributions.Categorical(logits=summary_logits).sample(), sentiment_label, self.dictionary['[SEP]'])
+        loss_argmax = self.classifier(summary, sentiment_label, self.dictionary['[SEP]'])
+        
+        RL_loss_sample = self.compute(-loss_sample, summary_logits)
+        RL_loss_argmax = self.compute(loss_argmax, summary_logits)
+        
+        self.optimizer_C.zero_grad()
+        #loss = torch.stack(loss).sum()
+        
+        cummulative_loss = RL_loss_sample + RL_loss_argmax
+        cummulative_loss.backward()
+        
+        self.optimizer_C.step()
+        
+        
+        return [RL_loss_sample.item(), RL_loss_argmax.item(), batch_G_loss, batch_D_loss/D_iters], [real_score, fake_score]
+        
+class Translator(nn.Module):
+    """
+    A standard Encoder-Decoder architecture. Base for this and many 
+    other models.
+    """
+    def __init__(self, encoder, decoder, src_embed, tgt_embed, generator):
+        super(Translator, self).__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        self.src_embed = src_embed
+        self.tgt_embed = tgt_embed
+        self.generator = generator
+        
+    def forward(self, src, src_mask, max_len, start_symbol):
+        "Take in and process masked src and target sequences."
+        
+        batch_size = src.shape[0]
+
+        memory = self.encode(src, src_mask)
+        ys = torch.ones(batch_size, 1).fill_(start_symbol).type_as(src.data)
+        logits = []
+        for i in range(max_len-1):
+            out = self.decode(memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src_mask))
+            #out = model.decode(memory, src_mask, ys, future_mask(ys.size(1)).type_as(src_mask))
+            #print(out.shape) #bs,len,256
+            log_probs = self.generator(out[:, -1, :])
+            #print(probs.shape) #bs,voc
+            
+            
+            values, next_words = torch.max(log_probs, dim=-1, keepdim=True)
+
+            #print(next_words.shape)        
+            #print(ys.shape) #both bs,1
+
+    #         print(next_words)
+
+            ys = torch.cat((ys, next_words), dim=1)
+            logits.append(values)
+        
+        logits = torch.stack(logits,1)
+        
+        return ys, logits
+        
+        #return self.decode(self.encode(src, src_mask), src_mask,tgt, tgt_mask)
+    
+    def encode(self, src, src_mask):
+        return self.encoder(self.src_embed(src), src_mask)
+    
+    def decode(self, memory, src_mask, tgt, tgt_mask):
+        return self.decoder(self.tgt_embed(tgt), memory, src_mask, tgt_mask)
+
+    
+class BERT(nn.Module):    
+    def __init__(self, transformer_encoder, src_embed, padding_index):
+        super(BERT, self).__init__()
+        self.src_embed = src_embed
+        self.transformer_encoder = transformer_encoder
+        self.padding_index = padding_index
+        
+    def forward(self, x):
+        src_mask = (x != self.padding_index).type_as(x).unsqueeze(-2)
+        return self.transformer_encoder( self.src_embed(x), src_mask )
+    
+class Classifier(nn.Module):
+    def __init__(self, BERT, criterion = nn.BCELoss(reduction='none')):
+        super(Classifier, self).__init__()
+        self.BERT = BERT
+        
+        self.criterion = criterion
+        
+        self.linear = nn.Linear(self.BERT.transformer_encoder.layers[-1].size, 1)
+        self.softmax = nn.Softmax(-1)
+        
+    def forward(self, x, y, end_symbol):
+        batch_size = x.shape[0]
+        eos = torch.ones(batch_size, 1).fill_(end_symbol).type_as(x)
+        x = self.BERT(torch.cat([x, eos], dim=1)) # bz, xlen+1, dmodel
+        x = self.linear(x[:,0,:])
+        x = self.softmax(x)
+        
+        loss = self.criterion(x, y)
+        
+        #(N)
+        return loss
+    
+# class Classifier(nn.Module):
+#     def __init__(self, transformer_encoder, src_embed, criterion = nn.BCELoss(reduction='none')):
+#         super(Classifier, self).__init__()
+        
+#         self.src_embed = src_embed
+#         self.transformer_encoder = transformer_encoder
+        
+#         self.criterion = criterion
+        
+#         self.linear = nn.Linear(self.transformer_encoder.layers[-1].size, 1)
+#         self.softmax = nn.Softmax(-1)
+        
+#     def forward(self, x, src_mask, y, end_symbol):
+#         x = self.transformer_encoder( self.src_embed(torch.cat(x ,end_symbol)), src_mask )
+#         x = self.linear(x)
+#         x = self.softmax(x)
+        
+#         loss = self.criterion(x, y)
+        
+#         #(N)
+#         return loss
+    
+    
+class Discriminator(nn.Module):
+    def __init__(self, BERT):
+        super(Discriminator, self).__init__()
+        self.BERT = BERT
+        
+        self.linear = nn.Linear(self.BERT.transformer_encoder.layers[-1].size, 1)
+        #self.sigmoid = nn.Sigmoid()
+    
+    def forward(self, x):
+        x = self.BERT(x)
+        score = self.linear(x)
+        return score
+        
+        
+        
+        
