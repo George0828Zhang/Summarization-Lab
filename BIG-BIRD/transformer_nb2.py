@@ -34,6 +34,7 @@ import math, copy, time
 from torch.autograd import Variable
 import matplotlib.pyplot as plt
 import os
+import torch.autograd as autograd
 
 # Table of Contents
 # 
@@ -763,7 +764,7 @@ def greedy_decode(model, src, src_mask, max_len, start_symbol):
 #----------------------------------------
 class BigBird():
     #generator is translator here
-    def __init__(self, generator, discriminator, classifier, dictionary, gamma = 0.99, clip_value = 0.1, lr_G = 1e-4, lr_D = 5e-5, lr_C = 5e-5):
+    def __init__(self, generator, discriminator, classifier, dictionary, gamma = 0.99, clip_value = 0.1, lr_G = 1e-4, lr_D = 5e-5, lr_C = 5e-5, LAMBDA = 10):
         super(BigBird, self).__init__()
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -778,8 +779,16 @@ class BigBird():
         self.eps = np.finfo(np.float32).eps.item()
         
         self.optimizer_C = torch.optim.Adam(list(self.generator.parameters()) + list(self.classifier.parameters()), lr=lr_G)
-        self.optimizer_G = torch.optim.RMSprop(self.generator.parameters(), lr=lr_D)
-        self.optimizer_D = torch.optim.RMSprop(self.discriminator.parameters(), lr=lr_C)
+        
+        #normal WGAN
+        #self.optimizer_G = torch.optim.RMSprop(self.generator.parameters(), lr=lr_D)
+        #self.optimizer_D = torch.optim.RMSprop(self.discriminator.parameters(), lr=lr_C)
+        
+        #WGAN GP
+        
+        self.LAMBDA = LAMBDA # Gradient penalty lambda hyperparameter
+        self.optimizer_G = torch.optim.Adam(self.generator.parameters(), lr=lr_D,  betas=(0.0, 0.9))
+        self.optimizer_D = torch.optim.Adam(self.discriminator.parameters(), lr=lr_C,  betas=(0.0, 0.9))
                
         self.clip_value = clip_value
         
@@ -790,7 +799,32 @@ class BigBird():
         self.batch_D_losses=[] 
         self.real_scores = []
         self.fake_scores = []
+    
+    def calc_gradient_penalty(self, netD, real_data, fake_data):
+        #print real_data.size()
+        BATCH_SIZE = real_data.shape[0]
+        alpha = torch.rand(BATCH_SIZE, 1)
+        alpha = alpha.expand(real_data.size())
+        alpha = alpha.to(self.device)
         
+        #print(real_data.shape) #[BATCH_SIZE, 19]
+        #print(fake_data.shape) #[BATCH_SIZE, 20]
+        interpolates_data = ( alpha * real_data.float() + ((1 - alpha) * fake_data[:,1:].float()) )
+
+        interpolates_data = interpolates_data.long().to(self.device)
+        
+        interpolates = netD.BERT.src_embed(interpolates_data)
+        interpolates = autograd.Variable(interpolates, requires_grad=True)
+        
+        src_mask = (interpolates_data != netD.BERT.padding_index).type_as(interpolates_data).unsqueeze(-2)
+        disc_interpolates = netD.BERT.transformer_encoder( interpolates, src_mask )
+
+        gradients = autograd.grad(outputs=disc_interpolates, inputs=interpolates,
+                                  grad_outputs=torch.ones(disc_interpolates.size()).to(self.device),
+                                  create_graph=True, retain_graph=True, only_inputs=True)[0]
+
+        gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean() * self.LAMBDA
+        return gradient_penalty
         
     def train_D(self, fake_datas, real_datas):
         ## train discriminator
@@ -800,12 +834,12 @@ class BigBird():
         #print(real_loss)
         #print(fake_loss)
         #input("")
-        batch_d_loss = -real_score + fake_score# + gradient_penalty
+        batch_d_loss = -real_score + fake_score + self.calc_gradient_penalty(self.discriminator, real_datas, fake_datas)
         batch_d_loss.backward();
         
         #Clip critic weights
-        for p in self.discriminator.parameters():
-            p.data.clamp_(-self.clip_value, self.clip_value)
+#         for p in self.discriminator.parameters():
+#             p.data.clamp_(-self.clip_value, self.clip_value)
         
         self.optimizer_D.step();
         
@@ -891,7 +925,7 @@ class BigBird():
                     'total_steps':self.total_steps                 
                     },save_path)
     
-    def run_iter(self, src, src_mask, max_len, real_data, sentiment_label, D_iters = 1, D_toggle = 'On', verbose = 1):
+    def run_iter(self, src, src_mask, max_len, real_data, sentiment_label, D_iters = 3, D_toggle = 'On', verbose = 1):
         #summary_logits have some problem
 
         
@@ -901,7 +935,7 @@ class BigBird():
         batch_D_loss = 0
         if(D_toggle == 'On'):
             for i in range(D_iters):          
-                batch_d_loss, real_score, fake_score= self.train_D(summary, real_data)
+                batch_d_loss, real_score, fake_score = self.train_D(summary, real_data)
                 batch_D_loss += batch_d_loss
         
         batch_D_loss = batch_D_loss/D_iters
@@ -945,6 +979,8 @@ class BigBird():
             self.indicies2string(src[0])
             print("summary:")
             self.indicies2string(summary[0])
+            print("real summary:")
+            self.indicies2string(real_data[0])
             print("sentiment:",ans[0].item())
             print("y:",sentiment_label[0].item())
             print("")
