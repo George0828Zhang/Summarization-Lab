@@ -850,7 +850,7 @@ class BigBird():
     
     def indicies2string(self, indices):
         inv_map = {v: k for k, v in self.dictionary.items()}
-        print([inv_map[i.item()] for i in indices[0]])
+        print([inv_map[i.item()] for i in indices])
         
     def train(self):
         self.generator.train()
@@ -891,7 +891,7 @@ class BigBird():
                     'total_steps':self.total_steps                 
                     },save_path)
     
-    def run_iter(self, src, src_mask, max_len, real_data, sentiment_label, D_iters = 3, D_toggle = 'On', verbose = 1):
+    def run_iter(self, src, src_mask, max_len, real_data, sentiment_label, D_iters = 1, D_toggle = 'On', verbose = 1):
         #summary_logits have some problem
 
         
@@ -912,8 +912,8 @@ class BigBird():
                    
             
         #assert type(summary_logits) is not list
-        loss_sample, sample_acc = self.classifier(torch.distributions.Categorical(logits=summary_logits).sample(), sentiment_label, self.dictionary['[SEP]'])
-        loss_argmax, argmax_acc = self.classifier(summary, sentiment_label, self.dictionary['[SEP]'])
+        loss_sample, sample_acc, _ = self.classifier(torch.distributions.Categorical(logits=summary_logits).sample(), sentiment_label, self.dictionary['[SEP]'])
+        loss_argmax, argmax_acc, ans = self.classifier(summary, sentiment_label, self.dictionary['[SEP]'])
         
         RL_loss_sample = self.compute(loss_sample, summary_logits)
         RL_loss_argmax = self.compute(loss_argmax, summary_logits)
@@ -941,7 +941,13 @@ class BigBird():
             self.save("./Nest/NewbornBird")
         
         if verbose == 1 and self.total_steps % 100 == 0:
-            self.indicies2string(summary)
+            print("origin:")
+            self.indicies2string(src[0])
+            print("summary:")
+            self.indicies2string(summary[0])
+            print("sentiment:",ans[0].item())
+            print("y:",sentiment_label[0].item())
+            print("")
         
         return [RL_loss_sample.item(), RL_loss_argmax.item(), batch_G_loss, batch_D_loss], [real_score, fake_score, sample_acc, argmax_acc]
         
@@ -1008,26 +1014,26 @@ class BERT(nn.Module):
         return self.transformer_encoder( self.src_embed(x), src_mask )
     
 class Classifier(nn.Module):
-    def __init__(self, BERT, criterion = nn.BCELoss(reduction='none')):
+    def __init__(self, BERT, criterion = nn.CrossEntropyLoss(reduction='none')):
         super(Classifier, self).__init__()
         self.BERT = BERT
         
         self.criterion = criterion
         
-        self.linear = nn.Linear(self.BERT.transformer_encoder.layers[-1].size, 1)
-        self.softmax = nn.Softmax(-1)
+        self.linear = nn.Linear(self.BERT.transformer_encoder.layers[-1].size, 5)
+        #self.softmax = nn.Softmax(-1)
         
     def forward(self, x, y, end_symbol):
         batch_size = x.shape[0]
         eos = torch.ones(batch_size, 1).fill_(end_symbol).type_as(x)
         x = self.BERT(torch.cat([x, eos], dim=1)) # bz, xlen+1, dmodel
-        x = self.linear(x[:,0,:])
-        x = self.softmax(x)
+        out = self.linear(x[:,0,:])       
+        y = y.squeeze(1)
         
-        loss = self.criterion(x, y)
-        acc = ((x>0.5).type_as(x)==y).type_as(x).mean().item()
+        acc = ((out.argmax(-1)) == y).type_as(out).mean()
+        loss = self.criterion(out, y)
 
-        return loss, acc
+        return loss, acc, out.argmax(-1)
     
 # class Classifier(nn.Module):
 #     def __init__(self, transformer_encoder, src_embed, criterion = nn.BCELoss(reduction='none')):
