@@ -764,7 +764,7 @@ def greedy_decode(model, src, src_mask, max_len, start_symbol):
 #----------------------------------------
 class BigBird():
     #generator is translator here
-    def __init__(self, generator, discriminator, classifier, dictionary, gamma = 0.99, clip_value = 0.1, lr_G = 1e-4, lr_D = 5e-5, lr_C = 5e-5, LAMBDA = 10):
+    def __init__(self, generator, discriminator, classifier, dictionary, gamma = 0.99, clip_value = 0.1, lr_G = 5e-5, lr_D = 5e-5, lr_C = 1e-4, LAMBDA = 10, RL_scale = 100):
         super(BigBird, self).__init__()
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -778,6 +778,7 @@ class BigBird():
         self.gamma = gamma
         self.eps = np.finfo(np.float32).eps.item()
         
+        self.RL_scale = RL_scale
         self.optimizer_C = torch.optim.Adam(list(self.generator.parameters()) + list(self.classifier.parameters()), lr=lr_G)
         
         #normal WGAN
@@ -862,7 +863,6 @@ class BigBird():
         # discount your saved reward
         
         # TODO:
-        
         cummulative_loss = 0
         # compute loss
         for i, reward in enumerate(batch_rewards):
@@ -925,7 +925,7 @@ class BigBird():
                     'total_steps':self.total_steps                 
                     },save_path)
     
-    def run_iter(self, src, src_mask, max_len, real_data, sentiment_label, D_iters = 3, D_toggle = 'On', verbose = 1):
+    def run_iter(self, src, src_mask, max_len, real_data, sentiment_label, D_iters = 5, D_toggle = 'On', verbose = 1):
         #summary_logits have some problem
 
         
@@ -949,32 +949,35 @@ class BigBird():
         loss_sample, sample_acc, _ = self.classifier(torch.distributions.Categorical(logits=summary_logits).sample(), sentiment_label, self.dictionary['[SEP]'])
         loss_argmax, argmax_acc, ans = self.classifier(summary, sentiment_label, self.dictionary['[SEP]'])
         
-        RL_loss_sample = self.compute(loss_sample, summary_logits)
-        RL_loss_argmax = self.compute(loss_argmax, summary_logits)
+        RL_loss_sample = self.RL_scale * self.compute(loss_sample, summary_logits)
+        RL_loss_argmax = self.RL_scale * self.compute(loss_argmax, summary_logits)
         
         self.optimizer_C.zero_grad()
         #loss = torch.stack(loss).sum()
         
-        cummulative_loss = -RL_loss_sample + RL_loss_argmax
+        cummulative_loss = (-RL_loss_sample + RL_loss_argmax)
         cummulative_loss.backward()
         
         self.optimizer_C.step()
         
-        self.total_steps += 1
+        
         
         self.RL_loss_samples.append(RL_loss_sample.item())
         self.RL_loss_argmaxes.append(RL_loss_argmax.item())
+        
         self.batch_G_losses.append(batch_G_loss)
         self.batch_D_losses.append(batch_D_loss)
         self.real_scores.append(real_score)
         self.fake_scores.append(fake_score)
+        
+        self.total_steps += 1
         
         if self.total_steps % 1000 == 0:
             if not os.path.exists("./Nest"):
                 os.makedirs("./Nest")
             self.save("./Nest/NewbornBird")
         
-        if verbose == 1 and self.total_steps % 100 == 0:
+        if verbose == 1 and self.total_steps % 10 == 0:
             print("origin:")
             self.indicies2string(src[0])
             print("summary:")
