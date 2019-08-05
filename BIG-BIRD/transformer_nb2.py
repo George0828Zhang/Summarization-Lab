@@ -930,8 +930,8 @@ class BigBird():
 
         
         summary = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'])
-        summary_logits = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'], mode = 'sample')
-        
+        summary_sample, summary_log_values = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'], mode = 'sample')
+
         batch_D_loss = 0
         if(D_toggle == 'On'):
             for i in range(D_iters):          
@@ -946,11 +946,11 @@ class BigBird():
                    
             
         #assert type(summary_logits) is not list
-        loss_sample, sample_acc, _ = self.classifier(torch.distributions.Categorical(logits=summary_logits).sample(), sentiment_label, self.dictionary['[SEP]'])
+        loss_sample, sample_acc, _ = self.classifier(summary_sample, sentiment_label, self.dictionary['[SEP]'])
         loss_argmax, argmax_acc, ans = self.classifier(summary, sentiment_label, self.dictionary['[SEP]'])
         
-        RL_loss_sample = self.RL_scale * self.compute(loss_sample, summary_logits)
-        RL_loss_argmax = self.RL_scale * self.compute(loss_argmax, summary_logits)
+        RL_loss_sample = self.RL_scale * self.compute(loss_sample, summary_log_values)
+        RL_loss_argmax = self.RL_scale * self.compute(loss_argmax, summary_log_values)
         
         self.optimizer_C.zero_grad()
         #loss = torch.stack(loss).sum()
@@ -977,7 +977,7 @@ class BigBird():
                 os.makedirs("./Nest")
             self.save("./Nest/NewbornBird")
         
-        if verbose == 1 and self.total_steps % 10 == 0:
+        if verbose == 1 and self.total_steps % 1000 == 0:
             print("origin:")
             self.indicies2string(src[0])
             print("summary:")
@@ -1010,7 +1010,7 @@ class Translator(nn.Module):
 
         memory = self.encode(src, src_mask)
         ys = torch.ones(batch_size, 1).fill_(start_symbol).type_as(src.data)
-        logits = []
+        log_values = []
         if(mode == 'argmax'):
             for i in range(max_len-1):
                 out = self.decode(memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src_mask))
@@ -1027,10 +1027,9 @@ class Translator(nn.Module):
                 values, _ = torch.max(log_probs, dim=-1, keepdim=True)
                 next_words = torch.distributions.Categorical(logits=log_probs).sample()
                 ys = torch.cat((ys, next_words.unsqueeze(1)), dim=1)
-                logits.append(values)
-            
-            logits = torch.stack(logits,1)
-            return logits
+                log_values.append(values)
+            log_values = torch.stack(log_values,1)
+            return ys, log_values
         
         #return self.decode(self.encode(src, src_mask), src_mask,tgt, tgt_mask)
     
@@ -1096,6 +1095,8 @@ class Classifier(nn.Module):
 #         #(N)
 #         return loss
     
+
+
     
 class Discriminator(nn.Module):
     def __init__(self, BERT):
