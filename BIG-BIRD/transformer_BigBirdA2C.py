@@ -98,6 +98,13 @@ class Generator(nn.Module):
         return F.log_softmax(self.proj(x), dim=-1)
 
 
+class CriticNet(nn.Module):
+    def __init__(self, d_model):
+        super(CriticNet, self).__init__()
+        self.proj = nn.Linear(d_model, 1)
+
+    def forward(self, x):
+        return self.proj(x)   
 # The Transformer follows this overall architecture using stacked self-attention and point-wise, fully connected layers for both the encoder and decoder, shown in the left and right halves of Figure 1, respectively. 
 
 # In[4]:
@@ -764,10 +771,10 @@ def greedy_decode(model, src, src_mask, max_len, start_symbol):
 #----------------------------------------
 class BigBird():
     #generator is translator here
-    def __init__(self, generator, discriminator, classifier, dictionary, gamma = 0.99, clip_value = 0.1, lr_G = 5e-5, lr_D = 5e-5, lr_C = 1e-4, LAMBDA = 10, RL_scale = 100, device = torch.device("cuda" if torch.cuda.is_available() else "cpu")):
+    def __init__(self, generator, discriminator, classifier, dictionary, gamma = 0.99, clip_value = 0.1, lr_G = 5e-5, lr_D = 5e-5, lr_C = 1e-4, LAMBDA = 10, RL_scale = 100, device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
         super(BigBird, self).__init__()
         
-        self.device = device#torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device
         
         self.dictionary = dictionary
         
@@ -782,8 +789,8 @@ class BigBird():
         self.optimizer_C = torch.optim.Adam(list(self.generator.parameters()) + list(self.classifier.parameters()), lr=lr_C)
         
         #normal WGAN
-        #self.optimizer_G = torch.optim.RMSprop(self.generator.parameters(), lr=lr_G)
-        #self.optimizer_D = torch.optim.RMSprop(self.discriminator.parameters(), lr=lr_D)
+        #self.optimizer_G = torch.optim.RMSprop(self.generator.parameters(), lr=lr_D)
+        #self.optimizer_D = torch.optim.RMSprop(self.discriminator.parameters(), lr=lr_C)
         
         #WGAN GP
         
@@ -794,12 +801,12 @@ class BigBird():
         self.clip_value = clip_value
         
         self.total_steps = 0
-        self.RL_loss_samples = []
-        self.RL_loss_argmaxes = []
+        self.RL_loss = []
         self.batch_G_losses = []
         self.batch_D_losses=[] 
         self.real_scores = []
         self.fake_scores = []
+        self.all_rewards = []
     
     def calc_gradient_penalty(self, netD, real_data, fake_data):
         #print real_data.size()
@@ -835,7 +842,7 @@ class BigBird():
         #print(real_loss)
         #print(fake_loss)
         #input("")
-        batch_d_loss = -real_score + fake_score # + self.calc_gradient_penalty(self.discriminator, real_datas, fake_datas)
+        batch_d_loss = -real_score + fake_score + self.calc_gradient_penalty(self.discriminator, real_datas, fake_datas)
         batch_d_loss.backward();
         
         #Clip critic weights
@@ -858,7 +865,7 @@ class BigBird():
         return batch_g_loss.item()      
         
         
-    def compute(self, batch_rewards, saved_log_probs):
+    def compute(self, batch_rewards, saved_log_probs, critic_values):
         # TODO:
         # discount your saved reward
         
@@ -875,12 +882,14 @@ class BigBird():
                 R = self.gamma * R
                 
             returns = torch.FloatTensor(returns).to(self.device)
-            returns = (returns - returns.mean()) / (returns.std() + self.eps)
+            advantages = returns - critic_values[i]
             #returns = torch.where(returns > 0 , returns, torch.FloatTensor([0.1] * len(returns)));
-            loss = torch.sum(torch.mul(saved_log_probs[i], returns).mul(-1), -1)
+            action_gain = (saved_log_probs[i] * advantages.detach()).mean()
+            value_loss =  F.smooth_l1_loss(returns, critic_values[i])
+            loss = value_loss - action_gain
             cummulative_loss += loss.mean()
          
-        return cummulative_loss
+        return cummulative_loss/batch_rewards.shape[0]
     
     def indicies2string(self, indices):
         inv_map = {v: k for k, v in self.dictionary.items()}
@@ -902,13 +911,13 @@ class BigBird():
         self.generator.load_state_dict(loader['generator'])
         self.discriminator.load_state_dict(loader['discriminator'])
         self.classifier.load_state_dict(loader['classifier'])
-        self.RL_loss_samples = loader['RL_loss_samples']
-        self.RL_loss_argmaxes = loader['RL_loss_argmaxes']
+        self.RL_loss = loader['RL_loss']
         self.batch_G_losses = loader['batch_G_losses']
         self.batch_D_losses = loader['batch_D_losses']
         self.real_scores = loader['real_scores']
         self.fake_scores = loader['fake_scores']
         self.total_steps = loader['total_steps']
+        self.all_rewards = loader['all_rewards']
     
     def save(self, save_path):
         print('lay egg to ./Nest ... save as', save_path)
@@ -916,94 +925,90 @@ class BigBird():
         torch.save({'generator':self.generator.state_dict(), 
                     'classifier':self.classifier.state_dict(), 
                     'discriminator':self.discriminator.state_dict(),
-                    'RL_loss_samples':self.RL_loss_samples,
-                    'RL_loss_argmaxes':self.RL_loss_argmaxes,
+                    'RL_loss':self.RL_loss,
                     'batch_G_losses':self.batch_G_losses,
                     'batch_D_losses':self.batch_D_losses,
                     'real_scores':self.real_scores,
                     'fake_scores':self.fake_scores,
-                    'total_steps':self.total_steps                 
+                    'total_steps':self.total_steps,
+                    'all_rewards':self.all_rewards
                     },save_path)
     
     def run_iter(self, src, src_mask, max_len, real_data, sentiment_label, D_iters = 5, D_toggle = 'On', verbose = 1):
         #summary_logits have some problem
 
         
-        summary = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'])
-        summary_sample, summary_log_values = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'], mode = 'sample')
+        #summary = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'])
+        summary_sample, summary_log_values, critic_values = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'], mode = 'sample')
 
         batch_D_loss = 0
         if(D_toggle == 'On'):
             for i in range(D_iters):          
-                batch_d_loss, real_score, fake_score = self.train_D(summary, real_data)
+                batch_d_loss, real_score, fake_score = self.train_D(summary_sample, real_data)
                 batch_D_loss += batch_d_loss
         
         batch_D_loss = batch_D_loss/D_iters
         
         batch_G_loss = 0 
         if(D_toggle == 'On'):
-            batch_G_loss = self.train_G(summary)          
+            batch_G_loss = self.train_G(summary_sample)          
                    
             
         #assert type(summary_logits) is not list
-        loss_sample, sample_acc, _ = self.classifier(summary_sample, sentiment_label, self.dictionary['[SEP]'])
-        loss_argmax, argmax_acc, ans = self.classifier(summary, sentiment_label, self.dictionary['[SEP]'])
+        rewards, acc, label = self.classifier(summary_sample, sentiment_label, self.dictionary['[SEP]'])
         
-        RL_loss_sample = self.RL_scale * self.compute(-loss_sample, summary_log_values)
-        RL_loss_argmax = self.RL_scale * self.compute(-loss_argmax, summary_log_values)
+        
         
         self.optimizer_C.zero_grad()
         #loss = torch.stack(loss).sum()
-        
-        cummulative_loss = (RL_loss_sample - RL_loss_argmax)
-        cummulative_loss.backward()
-        
+        RL_loss = self.RL_scale * self.compute(rewards, summary_log_values, critic_values)
+        RL_loss.backward()
+        nn.utils.clip_grad_norm_(list(self.generator.parameters()) + list(self.classifier.parameters()), 0.5)
         self.optimizer_C.step()
         
-        
-        
-        self.RL_loss_samples.append(RL_loss_sample.item())
-        self.RL_loss_argmaxes.append(RL_loss_argmax.item())
+        self.RL_loss.append(RL_loss.item())
         
         self.batch_G_losses.append(batch_G_loss)
         self.batch_D_losses.append(batch_D_loss)
         self.real_scores.append(real_score)
         self.fake_scores.append(fake_score)
+        self.all_rewards.append(rewards.mean().item())
         
         self.total_steps += 1
         
         if self.total_steps % 1000 == 0:
             if not os.path.exists("./Nest"):
                 os.makedirs("./Nest")
-            self.save("./Nest/NewbornBird")
+            self.save("./Nest/NewbornBirdA2C")
         
-        if verbose == 1 and self.total_steps % 1000 == 0:
+        if verbose == 1 and self.total_steps % 100 == 0:
             print("origin:")
             self.indicies2string(src[0])
             print("summary:")
-            self.indicies2string(summary[0])
+            self.indicies2string(summary_sample[0])
             print("real summary:")
             self.indicies2string(real_data[0])
-            print("sentiment:",ans[0].item())
+            print("sentiment:",label[0].item())
             print("y:",sentiment_label[0].item())
+            print("reward:",rewards[0].item())
             print("")
         
-        return [RL_loss_sample.item(), RL_loss_argmax.item(), batch_G_loss, batch_D_loss], [real_score, fake_score, sample_acc, argmax_acc]
+        return [RL_loss.item(), batch_G_loss, batch_D_loss], [real_score, fake_score, acc, rewards.mean().item()]
         
 class Translator(nn.Module):
     """
     A standard Encoder-Decoder architecture. Base for this and many 
     other models.
     """
-    def __init__(self, encoder, decoder, src_embed, tgt_embed, generator):
+    def __init__(self, encoder, decoder, src_embed, tgt_embed, generator, critic_net):
         super(Translator, self).__init__()
         self.encoder = encoder
         self.decoder = decoder
         self.src_embed = src_embed
         self.tgt_embed = tgt_embed
         self.generator = generator
-        
-    def forward(self, src, src_mask, max_len, start_symbol, mode = 'argmax'):
+        self.critic_net = critic_net
+    def forward(self, src, src_mask, max_len, start_symbol, mode = 'sample'):
         "Take in and process masked src and target sequences."
         
         batch_size = src.shape[0]
@@ -1011,6 +1016,7 @@ class Translator(nn.Module):
         memory = self.encode(src, src_mask)
         ys = torch.ones(batch_size, 1).fill_(start_symbol).type_as(src.data)
         log_values = []
+        critics = []
         if(mode == 'argmax'):
             for i in range(max_len-1):
                 out = self.decode(memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src_mask))
@@ -1024,12 +1030,15 @@ class Translator(nn.Module):
             for i in range(max_len-1):
                 out = self.decode(memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src_mask))
                 log_probs = self.generator(out[:, -1, :])
+                critic = self.critic_net(out[:, -1, :])               
                 values, _ = torch.max(log_probs, dim=-1, keepdim=True)
                 next_words = torch.distributions.Categorical(logits=log_probs).sample()
                 ys = torch.cat((ys, next_words.unsqueeze(1)), dim=1)
                 log_values.append(values)
+                critics.append(critic)
             log_values = torch.stack(log_values,1)
-            return ys, log_values
+            critics = torch.stack(critics,1)
+            return ys, log_values, critics
         
         #return self.decode(self.encode(src, src_mask), src_mask,tgt, tgt_mask)
     
@@ -1046,25 +1055,10 @@ class BERT(nn.Module):
         self.src_embed = src_embed
         self.transformer_encoder = transformer_encoder
         self.padding_index = padding_index
-        self.outsize = transformer_encoder.layers[-1].size
         
     def forward(self, x):
         src_mask = (x != self.padding_index).type_as(x).unsqueeze(-2)
         return self.transformer_encoder( self.src_embed(x), src_mask )
-    
-class LSTMEncoder(nn.Module):    
-    def __init__(self, vocab_sz, hidden_dim, padding_index):
-        super().__init__()
-        self.src_embed = nn.Embedding(vocab_sz, hidden_dim)
-        self.rnn_cell = nn.LSTM(hidden_dim, hidden_dim, num_layers=1, batch_first=True, bidirectional=True)
-        self.padding_index = padding_index
-        self.outsize = hidden_dim*2
-        
-    def forward(self, x):
-        #src_mask = (x != self.padding_index).type_as(x).unsqueeze(-2)
-        out, (h,c) = self.rnn_cell( self.src_embed(x))
-        return out
-
     
 class Classifier(nn.Module):
     def __init__(self, BERT, criterion = nn.CrossEntropyLoss(reduction='none')):
@@ -1073,7 +1067,7 @@ class Classifier(nn.Module):
         
         self.criterion = criterion
         
-        self.linear = nn.Linear(self.BERT.outsize, 5)
+        self.linear = nn.Linear(self.BERT.transformer_encoder.layers[-1].size, 5)
         #self.softmax = nn.Softmax(-1)
         
     def forward(self, x, y, end_symbol):
@@ -1083,11 +1077,10 @@ class Classifier(nn.Module):
         out = self.linear(x[:,0,:])       
         y = y.squeeze(1)
         
-        #acc = ((out.argmax(-1)) == y).type_as(out).mean()
-        acc = ((out.argmax(-1).type_as(y)) == y).float().mean()
+        acc = ((out.argmax(-1)) == y).type_as(out).mean()
         loss = self.criterion(out, y)
 
-        return loss, acc, out.argmax(-1)
+        return -loss, acc, out.argmax(-1)
     
 # class Classifier(nn.Module):
 #     def __init__(self, transformer_encoder, src_embed, criterion = nn.BCELoss(reduction='none')):
@@ -1119,7 +1112,7 @@ class Discriminator(nn.Module):
         super(Discriminator, self).__init__()
         self.BERT = BERT
         
-        self.linear = nn.Linear(self.BERT.outsize, 1)
+        self.linear = nn.Linear(self.BERT.transformer_encoder.layers[-1].size, 1)
         #self.sigmoid = nn.Sigmoid()
     
     def forward(self, x):
