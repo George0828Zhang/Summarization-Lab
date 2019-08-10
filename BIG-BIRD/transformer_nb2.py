@@ -874,7 +874,7 @@ class BigBird():
                 returns.insert(0, R)
                 R = self.gamma * R
                 
-            returns = torch.FloatTensor(returns).to(self.device)
+            returns = torch.stack(returns, 0)
             returns = (returns - returns.mean()) / (returns.std() + self.eps)
             #returns = torch.where(returns > 0 , returns, torch.FloatTensor([0.1] * len(returns)));
             loss = torch.sum(torch.mul(saved_log_probs[i], returns).mul(-1), -1)
@@ -957,7 +957,7 @@ class BigBird():
         
         cummulative_loss = (RL_loss_sample - RL_loss_argmax)
         cummulative_loss.backward()
-        
+        nn.utils.clip_grad_norm_(list(self.generator.parameters()) + list(self.classifier.parameters()), 0.5)
         self.optimizer_C.step()
         
         

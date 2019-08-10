@@ -880,8 +880,8 @@ class BigBird():
             for r in range(saved_log_probs.shape[1], 0, -1):
                 returns.insert(0, R)
                 R = self.gamma * R
-                
-            returns = torch.FloatTensor(returns).to(self.device)
+
+            returns = torch.stack(returns, 0)
             advantages = returns - critic_values[i]
             #returns = torch.where(returns > 0 , returns, torch.FloatTensor([0.1] * len(returns)));
             action_gain = (saved_log_probs[i] * advantages.detach()).mean()
@@ -934,7 +934,7 @@ class BigBird():
                     'all_rewards':self.all_rewards
                     },save_path)
     
-    def run_iter(self, src, src_mask, max_len, real_data, sentiment_label, D_iters = 5, D_toggle = 'On', verbose = 1):
+    def run_iter(self, src, src_mask, max_len, real_data, sentiment_label, writer, D_iters = 5, D_toggle = 'On', verbose = 1):
         #summary_logits have some problem
 
         
@@ -993,6 +993,8 @@ class BigBird():
             print("reward:",rewards[0].item())
             print("")
         
+        #for name, param in self.classifier.named_parameters():
+        #    writer.add_histogram(name, param.clone().cpu().data.numpy(), self.total_steps)
         return [RL_loss.item(), batch_G_loss, batch_D_loss], [real_score, fake_score, acc, rewards.mean().item()]
         
 class Translator(nn.Module):
@@ -1104,7 +1106,18 @@ class Classifier(nn.Module):
 #         #(N)
 #         return loss
     
-
+class LSTMEncoder(nn.Module):    
+    def __init__(self, vocab_sz, hidden_dim, padding_index):
+        super().__init__()
+        self.src_embed = nn.Embedding(vocab_sz, hidden_dim)
+        self.rnn_cell = nn.LSTM(hidden_dim, hidden_dim, num_layers=1, batch_first=True, bidirectional=True)
+        self.padding_index = padding_index
+        self.outsize = hidden_dim*2
+        
+    def forward(self, x):
+        #src_mask = (x != self.padding_index).type_as(x).unsqueeze(-2)
+        out, (h,c) = self.rnn_cell( self.src_embed(x))
+        return out
 
     
 class Discriminator(nn.Module):
