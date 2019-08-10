@@ -925,7 +925,7 @@ class BigBird():
                     'total_steps':self.total_steps                 
                     },save_path)
     
-    def run_iter(self, src, src_mask, max_len, real_data, sentiment_label, D_iters = 5, D_toggle = 'On', verbose = 1):
+    def run_iter(self, src, src_mask, max_len, real_data, sentiment_label, writer, D_iters = 5, D_toggle = 'On', verbose = 1):
         #summary_logits have some problem
 
         
@@ -987,7 +987,8 @@ class BigBird():
             print("sentiment:",ans[0].item())
             print("y:",sentiment_label[0].item())
             print("")
-        
+        for name, param in self.generator.named_parameters():
+            writer.add_histogram(name, param.clone().cpu().data.numpy(), self.total_steps)
         return [RL_loss_sample.item(), RL_loss_argmax.item(), batch_G_loss, batch_D_loss], [real_score, fake_score, sample_acc, argmax_acc]
         
 class Translator(nn.Module):
@@ -1024,11 +1025,13 @@ class Translator(nn.Module):
             for i in range(max_len-1):
                 out = self.decode(memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src_mask))
                 log_probs = self.generator(out[:, -1, :])
-                distri = torch.distributions.Categorical(logits=log_probs)
-                next_words = distri.sample()
-                #next_words = torch.distributions.Categorical(logits=log_probs).sample()
+                #distri = torch.distributions.Categorical(logits=log_probs)
+                #next_words = distri.sample()
+                values, _ = torch.max(log_probs, dim=-1, keepdim=True)
+                next_words = torch.distributions.Categorical(logits=log_probs).sample()
                 ys = torch.cat((ys, next_words.unsqueeze(1)), dim=1)
-                log_values.append(distri.log_prob(next_words))
+                #log_values.append(distri.log_prob(next_words))
+                log_values.append(values)
             log_values = torch.stack(log_values,1)
             return ys, log_values
         
