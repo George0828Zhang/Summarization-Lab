@@ -1024,10 +1024,11 @@ class Translator(nn.Module):
             for i in range(max_len-1):
                 out = self.decode(memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src_mask))
                 log_probs = self.generator(out[:, -1, :])
-                values, _ = torch.max(log_probs, dim=-1, keepdim=True)
-                next_words = torch.distributions.Categorical(logits=log_probs).sample()
+                distri = torch.distributions.Categorical(logits=log_probs)
+                next_words = distri.sample()
+                #next_words = torch.distributions.Categorical(logits=log_probs).sample()
                 ys = torch.cat((ys, next_words.unsqueeze(1)), dim=1)
-                log_values.append(values)
+                log_values.append(distri.log_prob(next_words))
             log_values = torch.stack(log_values,1)
             return ys, log_values
         
@@ -1067,13 +1068,13 @@ class LSTMEncoder(nn.Module):
 
     
 class Classifier(nn.Module):
-    def __init__(self, BERT, criterion = nn.CrossEntropyLoss(reduction='none')):
+    def __init__(self, BERT, out_class, criterion = nn.CrossEntropyLoss(reduction='none')):
         super(Classifier, self).__init__()
         self.BERT = BERT
         
         self.criterion = criterion
         
-        self.linear = nn.Linear(self.BERT.outsize, 5)
+        self.linear = nn.Linear(self.BERT.outsize, out_class)
         #self.softmax = nn.Softmax(-1)
         
     def forward(self, x, y, end_symbol):

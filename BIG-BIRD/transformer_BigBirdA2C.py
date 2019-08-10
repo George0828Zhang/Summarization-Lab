@@ -807,25 +807,27 @@ class BigBird():
         self.real_scores = []
         self.fake_scores = []
         self.all_rewards = []
-    
+        
     def calc_gradient_penalty(self, netD, real_data, fake_data):
         #print real_data.size()
         BATCH_SIZE = real_data.shape[0]
-        alpha = torch.rand(BATCH_SIZE, 1)
-        alpha = alpha.expand(real_data.size())
+        dim_1 = real_data.shape[1]
+        dim_2 = real_data.shape[2]
+        alpha = torch.rand(BATCH_SIZE, dim_1)
+        alpha = alpha.view(-1,1).expand(dim_1 * BATCH_SIZE, dim_2).view(BATCH_SIZE, dim_1, dim_2)
         alpha = alpha.to(self.device)
         
-        #print(real_data.shape) #[BATCH_SIZE, 19]
-        #print(fake_data.shape) #[BATCH_SIZE, 20]
-        interpolates_data = ( alpha * real_data.float() + ((1 - alpha) * fake_data[:,1:].float()) )
+        #print(real_data.shape) #[BATCH_SIZE, 19, vocab_sz]
+        #print(fake_data.shape) #[BATCH_SIZE, 19, vocab_sz]
+        interpolates_data = ( alpha * real_data.float() + ((1 - alpha) * fake_data.float()) )
 
-        interpolates_data = interpolates_data.long().to(self.device)
+        interpolates = interpolates_data.to(self.device)
         
-        interpolates = netD.BERT.src_embed(interpolates_data)
+        #interpolates = netD.disguised_embed(interpolates_data)
         interpolates = autograd.Variable(interpolates, requires_grad=True)
         
-        src_mask = (interpolates_data != netD.BERT.padding_index).type_as(interpolates_data).unsqueeze(-2)
-        disc_interpolates = netD.BERT.transformer_encoder( interpolates, src_mask )
+        src_mask = (interpolates_data.argmax(-1) != netD.padding_index).type_as(interpolates_data).unsqueeze(-2)
+        disc_interpolates = netD.transformer_encoder( interpolates, src_mask )
 
         gradients = autograd.grad(outputs=disc_interpolates, inputs=interpolates,
                                   grad_outputs=torch.ones(disc_interpolates.size()).to(self.device),
@@ -833,21 +835,29 @@ class BigBird():
 
         gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean() * self.LAMBDA
         return gradient_penalty
-        
+    
+    def _to_one_hot(self, y, n_dims, dtype=torch.cuda.FloatTensor):
+        scatter_dim = len(y.size())
+        y_tensor = y.type(torch.cuda.LongTensor).view(*y.size(), -1)
+        zeros = torch.zeros(*y.size(), n_dims).type(dtype)
+
+        return zeros.scatter(scatter_dim, y_tensor, 1) 
+    
     def train_D(self, fake_datas, real_datas):
-        ## train discriminator
-                    
+        ## train discriminator       
+        #print(real_datas.shape)
+        #print(fake_datas.shape)
         real_score = torch.mean(self.discriminator(real_datas)) 
         fake_score = torch.mean(self.discriminator(fake_datas))
         #print(real_loss)
         #print(fake_loss)
         #input("")
-        batch_d_loss = -real_score + fake_score + self.calc_gradient_penalty(self.discriminator, real_datas, fake_datas)
-        batch_d_loss.backward();
+        batch_d_loss = -real_score + fake_score #+ self.calc_gradient_penalty(self.discriminator, real_datas, fake_datas)
+        batch_d_loss.backward(retain_graph=True);
         
         #Clip critic weights
-#         for p in self.discriminator.parameters():
-#             p.data.clamp_(-self.clip_value, self.clip_value)
+        for p in self.discriminator.parameters():
+            p.data.clamp_(-self.clip_value, self.clip_value)
         
         self.optimizer_D.step();
         
@@ -859,12 +869,13 @@ class BigBird():
           
         batch_g_loss = -torch.mean(self.discriminator(fake_datas))
         
-        batch_g_loss.backward()
+        batch_g_loss.backward(retain_graph=True)
         self.optimizer_G.step()
 
         return batch_g_loss.item()      
         
-        
+    
+    
     def compute(self, batch_rewards, saved_log_probs, critic_values):
         # TODO:
         # discount your saved reward
@@ -939,19 +950,19 @@ class BigBird():
 
         
         #summary = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'])
-        summary_sample, summary_log_values, critic_values = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'], mode = 'sample')
+        summary_sample, summary_log_values, critic_values, summary_log_probs = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'], mode = 'sample')
 
         batch_D_loss = 0
         if(D_toggle == 'On'):
-            for i in range(D_iters):          
-                batch_d_loss, real_score, fake_score = self.train_D(summary_sample, real_data)
+            for i in range(D_iters):
+                batch_d_loss, real_score, fake_score = self.train_D(summary_log_probs, self._to_one_hot(real_data, len(self.dictionary)))
                 batch_D_loss += batch_d_loss
         
         batch_D_loss = batch_D_loss/D_iters
         
         batch_G_loss = 0 
         if(D_toggle == 'On'):
-            batch_G_loss = self.train_G(summary_sample)          
+            batch_G_loss = self.train_G(summary_log_probs)          
                    
             
         #assert type(summary_logits) is not list
@@ -1019,6 +1030,7 @@ class Translator(nn.Module):
         ys = torch.ones(batch_size, 1).fill_(start_symbol).type_as(src.data)
         log_values = []
         critics = []
+        all_log_probs = []
         if(mode == 'argmax'):
             for i in range(max_len-1):
                 out = self.decode(memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src_mask))
@@ -1038,9 +1050,11 @@ class Translator(nn.Module):
                 ys = torch.cat((ys, next_words.unsqueeze(1)), dim=1)
                 log_values.append(values)
                 critics.append(critic)
+                all_log_probs.append(log_probs)
             log_values = torch.stack(log_values,1)
             critics = torch.stack(critics,1)
-            return ys, log_values, critics
+            all_log_probs = torch.stack(all_log_probs,1)
+            return ys, log_values, critics, all_log_probs
         
         #return self.decode(self.encode(src, src_mask), src_mask,tgt, tgt_mask)
     
@@ -1063,13 +1077,13 @@ class BERT(nn.Module):
         return self.transformer_encoder( self.src_embed(x), src_mask )
     
 class Classifier(nn.Module):
-    def __init__(self, BERT, criterion = nn.CrossEntropyLoss(reduction='none')):
+    def __init__(self, BERT, label_size, criterion = nn.CrossEntropyLoss(reduction='none')):
         super(Classifier, self).__init__()
         self.BERT = BERT
         
         self.criterion = criterion
         
-        self.linear = nn.Linear(self.BERT.transformer_encoder.layers[-1].size, 5)
+        self.linear = nn.Linear(self.BERT.transformer_encoder.layers[-1].size, label_size)
         #self.softmax = nn.Softmax(-1)
         
     def forward(self, x, y, end_symbol):
@@ -1106,30 +1120,20 @@ class Classifier(nn.Module):
 #         #(N)
 #         return loss
     
-class LSTMEncoder(nn.Module):    
-    def __init__(self, vocab_sz, hidden_dim, padding_index):
-        super().__init__()
-        self.src_embed = nn.Embedding(vocab_sz, hidden_dim)
-        self.rnn_cell = nn.LSTM(hidden_dim, hidden_dim, num_layers=1, batch_first=True, bidirectional=True)
-        self.padding_index = padding_index
-        self.outsize = hidden_dim*2
-        
-    def forward(self, x):
-        #src_mask = (x != self.padding_index).type_as(x).unsqueeze(-2)
-        out, (h,c) = self.rnn_cell( self.src_embed(x))
-        return out
-
-    
 class Discriminator(nn.Module):
-    def __init__(self, BERT):
+    def __init__(self, transformer_encoder, hidden_dim, vocab_sz, padding_index):
         super(Discriminator, self).__init__()
-        self.BERT = BERT
         
-        self.linear = nn.Linear(self.BERT.transformer_encoder.layers[-1].size, 1)
+        self.padding_index = padding_index
+        
+        self.disguise_embed = nn.Linear(vocab_sz, hidden_dim)  
+        self.transformer_encoder = transformer_encoder
+        self.linear = nn.Linear(self.transformer_encoder.layers[-1].size, 1)
         #self.sigmoid = nn.Sigmoid()
     
     def forward(self, x):
-        x = self.BERT(x)
+        src_mask = (x.argmax(-1) != self.padding_index).type_as(x).unsqueeze(-2)
+        x = self.transformer_encoder(self.disguise_embed(x), src_mask)
         score = self.linear(x)
         return score
         
