@@ -1044,6 +1044,89 @@ class Translator(nn.Module):
         return self.decoder(self.tgt_embed(tgt), memory, src_mask, tgt_mask)
 
     
+class PointerGenerator(nn.Module):
+    def __init__(self, hidden_dim, emb_dim, input_len, output_len, voc_size, eps=1e-8):
+        super().__init__()
+        
+        self.hidden_dim = hidden_dim
+        self.emb_dim = emb_dim
+        self.input_len = input_len
+        self.output_len = output_len
+        self.voc_size = voc_size
+        self.teacher_prob = 1.
+        self.epsilon = eps
+        
+        self.emb_layer = nn.Embedding(voc_size, emb_dim)
+        self.encoder = nn.LSTM(emb_dim, hidden_dim, num_layers=1, batch_first=True, bidirectional=True)
+        self.decoder = nn.LSTM(emb_dim, hidden_dim*2, num_layers=1, batch_first=True)
+        
+        self.attention_softmax = nn.Softmax(dim=1)
+        
+        self.pro_layer = nn.Sequential(
+            nn.Linear(hidden_dim*4, voc_size, bias=True),
+            nn.Softmax(dim=-1)
+        )
+        self.pgen_layer = nn.Sequential(
+            nn.Linear(4*hidden_dim+emb_dim, 1, bias=True),
+            nn.Sigmoid()
+        )
+        
+    def forward(self, x, src_mask, max_len, start_symbol, mode = 'argmax'):
+        
+        batch_size = x.shape[0]
+        device = x.device
+        
+        # encoder
+        x_emb = self.emb_layer(x)
+        memory, (h, c) = self.encoder(x_emb)
+        h = h.transpose(0, 1).contiguous()
+        c = c.transpose(0, 1).contiguous()
+        h = h.view(batch_size, 1, h.shape[-1]*2)
+        c = c.view(batch_size, 1, c.shape[-1]*2)
+        h = h.transpose(0, 1).contiguous()
+        c = c.transpose(0, 1).contiguous()        
+
+        
+        ## decoder
+        out_h, out_c = (h, c)        
+        
+        ys = torch.ones(batch_size, 1).fill_(start_symbol).type_as(x.data)
+        
+        for i in range(self.output_len):
+            ans_emb = self.emb_layer(ys[:,-1]).view(batch_size, 1, self.emb_dim)
+            out, (out_h, out_c) = self.decoder(ans_emb, (out_h, out_c))
+            
+            attention = torch.bmm(memory, out.transpose(1, 2)).view(batch_size, self.input_len)
+            attention = self.attention_softmax(attention)
+            
+            pointer_prob = torch.zeros(batch_size, self.voc_size).type_as(attention)
+            pointer_prob = pointer_prob.scatter_add_(dim=1, index=x, src=attention).view(batch_size, 1, self.voc_size)
+            
+            context_vector = torch.bmm(attention.view(batch_size, 1, self.input_len), memory)
+            
+            feature = torch.cat((out, context_vector), -1)
+            pgen_feat = torch.cat((context_vector, out, ans_emb), -1)
+            
+            distri = self.pro_layer(feature)
+            pgen = self.pgen_layer(pgen_feat)
+
+            assert (pgen >= 0).all()
+            assert (distri >= 0).all()
+
+            final_dis = pgen*distri + (1.-pgen)*pointer_prob + self.epsilon
+            assert (final_dis > 0).all()
+            
+            log_probs = final_dis.log()
+            values, next_words = torch.max(log_probs, dim=-1, keepdim=True)
+            ys = torch.cat((ys, next_words.view(batch_size, 1)), dim=1)
+            
+            log_probs_seq = values if i == 0 else torch.cat((log_probs_seq, values), dim=1)
+
+        if mode == 'argmax':
+            return ys
+        else:
+            return ys, log_probs_seq
+    
 class BERT(nn.Module):    
     def __init__(self, transformer_encoder, src_embed, padding_index):
         super(BERT, self).__init__()
@@ -1132,5 +1215,12 @@ class Discriminator(nn.Module):
         return score
         
         
-        
+# translator = PointerGenerator(
+#         hidden_dim=d_model, 
+#         emb_dim=d_model, 
+#         input_len=INPUT_MAX, 
+#         output_len=SUMM_MAX, 
+#         voc_size=vocab_sz, 
+#         eps=1e-8
+#     )
         
