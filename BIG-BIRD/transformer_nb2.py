@@ -764,7 +764,7 @@ def greedy_decode(model, src, src_mask, max_len, start_symbol):
 #----------------------------------------
 class BigBird():
     #generator is translator here
-    def __init__(self, generator, discriminator, classifier, dictionary, gamma = 0.99, clip_value = 0.1, lr_G = 5e-5, lr_D = 5e-5, lr_C = 1e-4, LAMBDA = 10, RL_scale = 100, device = torch.device("cuda" if torch.cuda.is_available() else "cpu")):
+    def __init__(self, generator, discriminator, reconstructor, dictionary, gamma = 0.99, clip_value = 0.1, lr_G = 5e-5, lr_D = 5e-5, lr_R = 1e-4, LAMBDA = 10, RL_scale = 100, device = torch.device("cuda" if torch.cuda.is_available() else "cpu")):
         super(BigBird, self).__init__()
         
         self.device = device#torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -772,14 +772,14 @@ class BigBird():
         self.dictionary = dictionary
         
         self.generator = generator.to(self.device)
-        self.classifier = classifier.to(self.device)
+        self.reconstructor = reconstructor.to(self.device)
         self.discriminator = discriminator.to(self.device)
         
         self.gamma = gamma
         self.eps = np.finfo(np.float32).eps.item()
         
         self.RL_scale = RL_scale
-        self.optimizer_C = torch.optim.Adam(list(self.generator.parameters()) + list(self.classifier.parameters()), lr=lr_C)
+        self.optimizer_R = torch.optim.Adam(list(self.generator.parameters()) + list(self.reconstructor.parameters()), lr=lr_R)
         
         #normal WGAN
         #self.optimizer_G = torch.optim.RMSprop(self.generator.parameters(), lr=lr_G)
@@ -888,12 +888,12 @@ class BigBird():
         
     def train(self):
         self.generator.train()
-        self.classifier.train()
+        self.reconstructor.train()
         self.discriminator.train()
         
     def eval(self):
         self.generator.eval()
-        self.classifier.eval()
+        self.reconstructor.eval()
         self.discriminator.eval()
     
     def load(self, load_path):
@@ -901,64 +901,71 @@ class BigBird():
         loader = torch.load(load_path)
         self.generator.load_state_dict(loader['generator'])
         self.discriminator.load_state_dict(loader['discriminator'])
-        self.classifier.load_state_dict(loader['classifier'])
-        self.RL_loss_samples = loader['RL_loss_samples']
-        self.RL_loss_argmaxes = loader['RL_loss_argmaxes']
+        self.reconstructorload_state_dict(loader['reconstructor'])
+        self.RL_loss = loader['RL_loss']
         self.batch_G_losses = loader['batch_G_losses']
         self.batch_D_losses = loader['batch_D_losses']
         self.real_scores = loader['real_scores']
         self.fake_scores = loader['fake_scores']
         self.total_steps = loader['total_steps']
+        self.all_rewards = loader['all_rewards']
     
     def save(self, save_path):
         print('lay egg to ./Nest ... save as', save_path)
 
         torch.save({'generator':self.generator.state_dict(), 
-                    'classifier':self.classifier.state_dict(), 
+                    'reconstructor':self.reconstructor.state_dict(), 
                     'discriminator':self.discriminator.state_dict(),
-                    'RL_loss_samples':self.RL_loss_samples,
-                    'RL_loss_argmaxes':self.RL_loss_argmaxes,
+                    'RL_loss':self.RL_loss,
                     'batch_G_losses':self.batch_G_losses,
                     'batch_D_losses':self.batch_D_losses,
                     'real_scores':self.real_scores,
                     'fake_scores':self.fake_scores,
-                    'total_steps':self.total_steps                 
+                    'total_steps':self.total_steps,
+                    'all_rewards':self.all_rewards
                     },save_path)
     
     def run_iter(self, src, src_mask, max_len, real_data, sentiment_label, writer, D_iters = 5, D_toggle = 'On', verbose = 1):
         #summary_logits have some problem
 
         
-        summary = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'])
-        summary_sample, summary_log_values = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'], mode = 'sample')
+        summary_argmax , argmax_log_values = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'])
+        summary_sample, sample_log_values = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'], mode = 'sample')
 
         batch_D_loss = 0
         if(D_toggle == 'On'):
             for i in range(D_iters):          
-                batch_d_loss, real_score, fake_score = self.train_D(summary, real_data)
+                batch_d_loss, real_score, fake_score = self.train_D(summary_argmax, real_data)
                 batch_D_loss += batch_d_loss
         
         batch_D_loss = batch_D_loss/D_iters
         
         batch_G_loss = 0 
         if(D_toggle == 'On'):
-            batch_G_loss = self.train_G(summary)          
+            batch_G_loss = self.train_G(summary_argmax)          
                    
             
         #assert type(summary_logits) is not list
-        loss_sample, sample_acc, _ = self.classifier(summary_sample, sentiment_label, self.dictionary['[SEP]'])
-        loss_argmax, argmax_acc, ans = self.classifier(summary, sentiment_label, self.dictionary['[SEP]'])
+        #loss_sample, sample_acc, _ = self.classifier(summary_sample, sentiment_label, self.dictionary['[SEP]'])
+        #loss_argmax, argmax_acc, ans = self.classifier(summary, sentiment_label, self.dictionary['[SEP]'])
         
-        RL_loss_sample = self.RL_scale * self.compute(-loss_sample, summary_log_values)
-        RL_loss_argmax = self.RL_scale * self.compute(-loss_argmax, summary_log_values)
+        summary_mask = (summary_argmax != self.dictionary['[SEP]']).type_as(summary_argmax).unsqueeze(-2)
+        argmax_rewards, argmax_acc = self.reconstructor(summary_argmax, summary_mask, src.shape[1], self.dictionary['[CLS]'], src)
         
-        self.optimizer_C.zero_grad()
+        summary_mask = (summary_sample != self.dictionary['[SEP]']).type_as(summary_sample).unsqueeze(-2)
+        sample_rewards, sample_acc = self.reconstructor(summary_sample, summary_mask, src.shape[1], self.dictionary['[CLS]'], src)
+        
+        
+        RL_loss_sample = self.RL_scale * self.compute(sample_rewards, sample_log_values)
+        RL_loss_argmax = self.RL_scale * self.compute(argmax_rewards, argmax_log_values)
+        
+        self.optimizer_R.zero_grad()
         #loss = torch.stack(loss).sum()
         
         cummulative_loss = (RL_loss_sample - RL_loss_argmax)
         cummulative_loss.backward()
-        nn.utils.clip_grad_norm_(list(self.generator.parameters()) + list(self.classifier.parameters()), 0.5)
-        self.optimizer_C.step()
+        nn.utils.clip_grad_norm_(list(self.generator.parameters()) + list(self.reconstructor.parameters()), 0.5)
+        self.optimizer_R.step()
         
         
         
@@ -975,20 +982,20 @@ class BigBird():
         if self.total_steps % 1000 == 0:
             if not os.path.exists("./Nest"):
                 os.makedirs("./Nest")
-            self.save("./Nest/NewbornBird")
+            self.save("./Nest/NewbornBird_PG")
         
         if verbose == 1 and self.total_steps % 1000 == 0:
             print("origin:")
             self.indicies2string(src[0])
-            print("summary:")
-            self.indicies2string(summary[0])
+            print("summary(argmax):")
+            self.indicies2string(summary_argmax[0])
+            print("summary(sample):")
+            self.indicies2string(summary_sample[0])
             print("real summary:")
             self.indicies2string(real_data[0])
-            print("sentiment:",ans[0].item())
-            print("y:",sentiment_label[0].item())
             print("")
-        for name, param in self.generator.named_parameters():
-            writer.add_histogram(name, param.clone().cpu().data.numpy(), self.total_steps)
+#         for name, param in self.generator.named_parameters():
+#             writer.add_histogram(name, param.clone().cpu().data.numpy(), self.total_steps)
         return [RL_loss_sample.item(), RL_loss_argmax.item(), batch_G_loss, batch_D_loss], [real_score, fake_score, sample_acc, argmax_acc]
         
 class Translator(nn.Module):
@@ -1012,28 +1019,24 @@ class Translator(nn.Module):
         memory = self.encode(src, src_mask)
         ys = torch.ones(batch_size, 1).fill_(start_symbol).type_as(src.data)
         log_values = []
-        if(mode == 'argmax'):
-            for i in range(max_len-1):
-                out = self.decode(memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src_mask))
-                log_probs = self.generator(out[:, -1, :])
-                values, next_words = torch.max(log_probs, dim=-1, keepdim=True)
 
-                ys = torch.cat((ys, next_words), dim=1)
-            return ys
-        else:
-            #mode == 'sample
-            for i in range(max_len-1):
-                out = self.decode(memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src_mask))
-                log_probs = self.generator(out[:, -1, :])
-                #distri = torch.distributions.Categorical(logits=log_probs)
-                #next_words = distri.sample()
-                values, _ = torch.max(log_probs, dim=-1, keepdim=True)
-                next_words = torch.distributions.Categorical(logits=log_probs).sample()
-                ys = torch.cat((ys, next_words.unsqueeze(1)), dim=1)
-                #log_values.append(distri.log_prob(next_words))
-                log_values.append(values)
-            log_values = torch.stack(log_values,1)
-            return ys, log_values
+        for i in range(max_len-1):
+            out = self.decode(memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src_mask))
+            log_probs = self.generator(out[:, -1, :])
+            #distri = torch.distributions.Categorical(logits=log_probs)
+            #next_words = distri.sample()     
+            if mode == 'argmax':
+                values, next_words = torch.max(log_probs, dim=-1, keepdim=True)
+            if mode == 'sample':
+                m = torch.distributions.Categorical(logits=log_probs)
+                next_words = m.sample()
+                values = m.log_prob(next_words)
+
+            ys = torch.cat((ys, next_words.view(batch_size, 1)), dim=1)
+            #log_values.append(distri.log_prob(next_words))
+            log_values.append(values)
+        log_values = torch.stack(log_values,1)
+        return ys, log_values
         
         #return self.decode(self.encode(src, src_mask), src_mask,tgt, tgt_mask)
     
@@ -1117,14 +1120,19 @@ class PointerGenerator(nn.Module):
             assert (final_dis > 0).all()
             
             log_probs = final_dis.log()
-            values, next_words = torch.max(log_probs, dim=-1, keepdim=True)
+                
+            if mode == 'argmax':
+                values, next_words = torch.max(log_probs, dim=-1, keepdim=True)
+            if mode == 'sample':
+                m = torch.distributions.Categorical(logits=log_probs)
+                next_words = m.sample()
+                values = m.log_prob(next_words)
+                
+                
             ys = torch.cat((ys, next_words.view(batch_size, 1)), dim=1)
             
             log_probs_seq = values if i == 0 else torch.cat((log_probs_seq, values), dim=1)
 
-        if mode == 'argmax':
-            return ys
-        else:
             return ys, log_probs_seq
     
 class BERT(nn.Module):    
@@ -1199,7 +1207,45 @@ class Classifier(nn.Module):
 #         return loss
     
 
-
+class Reconstructor(nn.Module):
+    """
+    A standard Encoder-Decoder architecture. Base for this and many 
+    other models.
+    """
+    def __init__(self, encoder, decoder, src_embed, tgt_embed, generator, pad_index):
+        super().__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        self.src_embed = src_embed
+        self.tgt_embed = tgt_embed
+        self.generator = generator
+        self.criterion = torch.nn.NLLLoss(reduction='none', ignore_index = pad_index)
+        
+    def forward(self, src, src_mask, max_len, start_symbol, y, mode = 'teacher_forcing'):
+        "Take in and process masked src and target sequences."        
+        batch_size = src.shape[0]
+        memory = self.encode(src, src_mask)
+        ys = torch.ones(batch_size, 1).fill_(start_symbol).type_as(src.data)        
+        logits = []
+        for i in range(max_len):
+            out = self.decode(memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src_mask))
+            log_probs = self.generator(out[:, -1, :])             
+            ys = torch.cat((ys, y[:,i].unsqueeze(-1)), dim = 1)
+            logits.append(log_probs)
+            
+        logits = torch.stack(logits, 1)
+        loss = self.criterion(logits.view(batch_size * max_len, -1), y.view(batch_size * max_len))
+        
+        loss = loss.view(batch_size,-1).mean(-1)
+        acc = ((logits.argmax(-1)) == y).type_as(logits).mean()
+        
+        return -loss, acc
+        
+    def encode(self, src, src_mask):
+        return self.encoder(self.src_embed(src), src_mask)
+    
+    def decode(self, memory, src_mask, tgt, tgt_mask):
+        return self.decoder(self.tgt_embed(tgt), memory, src_mask, tgt_mask)
     
 class Discriminator(nn.Module):
     def __init__(self, BERT):

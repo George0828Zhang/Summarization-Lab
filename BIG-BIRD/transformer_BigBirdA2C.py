@@ -104,7 +104,7 @@ class CriticNet(nn.Module):
         self.proj = nn.Linear(d_model, 1)
 
     def forward(self, x):
-        return self.proj(x)   
+        return self.proj(x).squeeze(1)   
 # The Transformer follows this overall architecture using stacked self-attention and point-wise, fully connected layers for both the encoder and decoder, shown in the left and right halves of Figure 1, respectively. 
 
 # In[4]:
@@ -895,11 +895,11 @@ class BigBird():
                 R = self.gamma * R
 
             returns = torch.stack(returns, 0)
-            advantages = returns - critic_values[i]
+            #advantages = returns - critic_values[i]
             #returns = torch.where(returns > 0 , returns, torch.FloatTensor([0.1] * len(returns)));
-            action_gain = (saved_log_probs[i] * advantages.detach()).mean()
+            #action_gain = (saved_log_probs[i] * advantages.detach()).mean()
             value_loss =  F.smooth_l1_loss(returns, critic_values[i])
-            loss = value_loss - action_gain
+            loss = value_loss #- action_gain
             cummulative_loss += loss.mean()
          
         return cummulative_loss/batch_rewards.shape[0]
@@ -923,7 +923,7 @@ class BigBird():
         loader = torch.load(load_path)
         self.generator.load_state_dict(loader['generator'])
         self.discriminator.load_state_dict(loader['discriminator'])
-        self.reconstructorload_state_dict(loader['reconstructor'])
+        self.reconstructor.load_state_dict(loader['reconstructor'])
         self.RL_loss = loader['RL_loss']
         self.batch_G_losses = loader['batch_G_losses']
         self.batch_D_losses = loader['batch_D_losses']
@@ -1007,7 +1007,7 @@ class BigBird():
                 os.makedirs("./Nest")
             self.save("./Nest/NewbornBirdA2C")
         
-        if verbose == 1 and self.total_steps % 1000 == 0:
+        if verbose == 1 and self.total_steps % 3000 == 0:
             print("origin:")
             self.indicies2string(src[0])
             print("summary:")
@@ -1016,7 +1016,7 @@ class BigBird():
             self.indicies2string(real_data[0])
 #             print("sentiment:",label[0].item())
 #             print("y:",sentiment_label[0].item())
-            print("reward:",rewards[0].item())
+#            print("reward:",rewards[0].item())
             print("")
         
         #for name, param in self.classifier.named_parameters():
@@ -1046,29 +1046,25 @@ class Translator(nn.Module):
         log_values = []
         critics = []
         all_log_probs = []
-        if(mode == 'argmax'):
-            for i in range(max_len):
-                out = self.decode(memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src_mask))
-                log_probs = self.generator(out[:, -1, :])
+        for i in range(max_len):
+            out = self.decode(memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src_mask))
+            log_probs = self.generator(out[:, -1, :])
+            critic = self.critic_net(out[:, -1, :])
+            if mode == 'argmax':
                 values, next_words = torch.max(log_probs, dim=-1, keepdim=True)
-                ys = torch.cat((ys, next_words), dim=1)
-            return ys
-        else:
-            #mode == 'sample
-            for i in range(max_len):
-                out = self.decode(memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src_mask))
-                log_probs = self.generator(out[:, -1, :])
-                critic = self.critic_net(out[:, -1, :])               
-                values, _ = torch.max(log_probs, dim=-1, keepdim=True)
-                next_words = torch.distributions.Categorical(logits=log_probs).sample()
-                ys = torch.cat((ys, next_words.unsqueeze(1)), dim=1)
-                log_values.append(values)
-                critics.append(critic)
-                all_log_probs.append(log_probs)
-            log_values = torch.stack(log_values,1)
-            critics = torch.stack(critics,1)
-            all_log_probs = torch.stack(all_log_probs,1)
-            return ys, log_values, critics, all_log_probs
+            if mode == 'sample':
+                m = torch.distributions.Categorical(logits=log_probs)
+                next_words = m.sample()
+                values = m.log_prob(next_words)             
+
+            ys = torch.cat((ys, next_words.view(batch_size, 1)), dim=1)
+            log_values.append(values)
+            critics.append(critic)
+            all_log_probs.append(log_probs)
+        log_values = torch.stack(log_values,1)
+        critics = torch.stack(critics,1)
+        all_log_probs = torch.stack(all_log_probs,1)
+        return ys, log_values, critics, all_log_probs
     
     def encode(self, src, src_mask):
         return self.encoder(self.src_embed(src), src_mask)
@@ -1124,7 +1120,7 @@ class Reconstructor(nn.Module):
         self.generator = generator
         self.criterion = torch.nn.NLLLoss(reduction='none', ignore_index = pad_index)
         
-    def forward(self, src, src_mask, max_len, start_symbol, y, mode = 'sample'):
+    def forward(self, src, src_mask, max_len, start_symbol, y, mode = 'teacher_forcing'):
         "Take in and process masked src and target sequences."        
         batch_size = src.shape[0]
         memory = self.encode(src, src_mask)
@@ -1134,7 +1130,7 @@ class Reconstructor(nn.Module):
         for i in range(max_len):
             out = self.decode(memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src_mask))
             log_probs = self.generator(out[:, -1, :])             
-            values, _ = torch.max(log_probs, dim=-1, keepdim=True)
+            #values, _ = torch.max(log_probs, dim=-1, keepdim=True)
             #next_words = torch.distributions.Categorical(logits=log_probs).sample()
             #ys = torch.cat((ys, next_words.unsqueeze(1)), dim=1)
             ys = torch.cat((ys, y[:,i].unsqueeze(-1)), dim = 1)
@@ -1143,9 +1139,12 @@ class Reconstructor(nn.Module):
         logits = torch.stack(logits, 1)
         loss = self.criterion(logits.view(batch_size * max_len, -1), y.view(batch_size * max_len))
         
+        #reconstruction with 100 len seen as 1 reward, and summary with 10 len seen as action
+        #loss = 
+        loss = loss.view(batch_size,-1).mean(-1)
         acc = ((logits.argmax(-1)) == y).type_as(logits).mean()
         
-        return -loss.view(batch_size, max_len), acc
+        return -loss, acc
         
     def encode(self, src, src_mask):
         return self.encoder(self.src_embed(src), src_mask)
