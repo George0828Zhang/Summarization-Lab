@@ -984,7 +984,7 @@ class BigBird():
                 os.makedirs("./Nest")
             self.save("./Nest/NewbornBird_PG")
         
-        if verbose == 1 and self.total_steps % 1 == 0:
+        if verbose == 1 and self.total_steps % 1000 == 0:
             print("origin:")
             self.indicies2string(src[0])
             print("summary(argmax):")
@@ -1000,7 +1000,7 @@ class BigBird():
             print("")
 #         for name, param in self.generator.named_parameters():
 #             writer.add_histogram(name, param.clone().cpu().data.numpy(), self.total_steps)
-        return [RL_loss_sample.item(), RL_loss_argmax.item(), batch_G_loss, batch_D_loss], [real_score, fake_score, sample_acc, argmax_acc]
+        return [RL_loss_sample.item(), RL_loss_argmax.item(), batch_G_loss, batch_D_loss], [real_score, fake_score, sample_acc, argmax_acc, sample_rewards.mean().item(), argmax_rewards.mean().item()]
         
 class Translator(nn.Module):
     """
