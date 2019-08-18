@@ -916,7 +916,6 @@ class BigBird():
         torch.save({'generator':self.generator.state_dict(), 
                     'reconstructor':self.reconstructor.state_dict(), 
                     'discriminator':self.discriminator.state_dict(),
-                    'RL_loss':self.RL_loss,
                     'batch_G_losses':self.batch_G_losses,
                     'batch_D_losses':self.batch_D_losses,
                     'real_scores':self.real_scores,
@@ -950,10 +949,10 @@ class BigBird():
         #loss_argmax, argmax_acc, ans = self.classifier(summary, sentiment_label, self.dictionary['[SEP]'])
         
         summary_mask = (summary_argmax != self.dictionary['[SEP]']).type_as(summary_argmax).unsqueeze(-2)
-        argmax_rewards, argmax_acc, argmax_out = self.reconstructor(summary_argmax, summary_mask, src.shape[1], self.dictionary['[CLS]'], src)
+        argmax_rewards, argmax_acc = self.reconstructor(summary_argmax, summary_mask, src.shape[1], self.dictionary['[CLS]'], src)
         
         summary_mask = (summary_sample != self.dictionary['[SEP]']).type_as(summary_sample).unsqueeze(-2)
-        sample_rewards, sample_acc, sample_out = self.reconstructor(summary_sample, summary_mask, src.shape[1], self.dictionary['[CLS]'], src)
+        sample_rewards, sample_acc = self.reconstructor(summary_sample, summary_mask, src.shape[1], self.dictionary['[CLS]'], src)
         
         
         RL_loss_sample = self.RL_scale * self.compute(sample_rewards, sample_log_values)
@@ -993,14 +992,10 @@ class BigBird():
             self.indicies2string(summary_sample[0])
             print("real summary:")
             self.indicies2string(real_data[0])
-            print("reconsturctor out(argmax):")
-            self.indicies2string(argmax_out[0])
-            print("reconsturctor out(sample):")
-            self.indicies2string(sample_out[0])
             print("")
 #         for name, param in self.generator.named_parameters():
 #             writer.add_histogram(name, param.clone().cpu().data.numpy(), self.total_steps)
-        return [RL_loss_sample.item(), RL_loss_argmax.item(), batch_G_loss, batch_D_loss], [real_score, fake_score, sample_acc, argmax_acc, sample_rewards.mean().item(), argmax_rewards.mean().item()]
+        return [RL_loss_sample.item(), RL_loss_argmax.item(), batch_G_loss, batch_D_loss], [real_score, fake_score, sample_acc, argmax_acc]
         
 class Translator(nn.Module):
     """
@@ -1024,7 +1019,7 @@ class Translator(nn.Module):
         ys = torch.ones(batch_size, 1).fill_(start_symbol).type_as(src.data)
         log_values = []
 
-        for i in range(max_len):
+        for i in range(max_len-1):
             out = self.decode(memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src_mask))
             log_probs = self.generator(out[:, -1, :])
             #distri = torch.distributions.Categorical(logits=log_probs)
@@ -1231,24 +1226,19 @@ class Reconstructor(nn.Module):
         memory = self.encode(src, src_mask)
         ys = torch.ones(batch_size, 1).fill_(start_symbol).type_as(src.data)        
         logits = []
-        #mode == 'sample
         for i in range(max_len):
             out = self.decode(memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src_mask))
-            log_probs = self.generator(out[:, -1, :])
-            if( i < max_len - 1):
-                ys = torch.cat((ys, y[:,i+1].unsqueeze(-1)), dim = 1)
+            log_probs = self.generator(out[:, -1, :])             
+            ys = torch.cat((ys, y[:,i].unsqueeze(-1)), dim = 1)
             logits.append(log_probs)
             
         logits = torch.stack(logits, 1)
         loss = self.criterion(logits.view(batch_size * max_len, -1), y.view(batch_size * max_len))
         
-
-        #reconstruction with 100 len seen as 1 reward, and summary with 10 len seen as action
-        #loss = 
         loss = loss.view(batch_size,-1).mean(-1)
         acc = ((logits.argmax(-1)) == y).type_as(logits).mean()
         
-        return -loss, acc, logits.argmax(-1)
+        return -loss, acc
         
     def encode(self, src, src_mask):
         return self.encoder(self.src_embed(src), src_mask)
