@@ -984,7 +984,7 @@ class BigBird():
                 os.makedirs("./Nest")
             self.save("./Nest/NewbornBird_PG")
         
-        if verbose == 1 and self.total_steps % 1000 == 0:
+        if verbose == 1 and self.total_steps % 1 == 0:
             print("origin:")
             self.indicies2string(src[0])
             print("summary(argmax):")
@@ -1024,7 +1024,7 @@ class Translator(nn.Module):
         ys = torch.ones(batch_size, 1).fill_(start_symbol).type_as(src.data)
         log_values = []
 
-        for i in range(max_len-1):
+        for i in range(max_len):
             out = self.decode(memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src_mask))
             log_probs = self.generator(out[:, -1, :])
             #distri = torch.distributions.Categorical(logits=log_probs)
