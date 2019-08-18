@@ -901,8 +901,7 @@ class BigBird():
         loader = torch.load(load_path)
         self.generator.load_state_dict(loader['generator'])
         self.discriminator.load_state_dict(loader['discriminator'])
-        self.reconstructorload_state_dict(loader['reconstructor'])
-        self.RL_loss = loader['RL_loss']
+        self.reconstructor.load_state_dict(loader['reconstructor'])
         self.batch_G_losses = loader['batch_G_losses']
         self.batch_D_losses = loader['batch_D_losses']
         self.real_scores = loader['real_scores']
@@ -995,7 +994,7 @@ class BigBird():
             print("")
 #         for name, param in self.generator.named_parameters():
 #             writer.add_histogram(name, param.clone().cpu().data.numpy(), self.total_steps)
-        return [RL_loss_sample.item(), RL_loss_argmax.item(), batch_G_loss, batch_D_loss], [real_score, fake_score, sample_acc, argmax_acc]
+        return [RL_loss_sample.item(), RL_loss_argmax.item(), batch_G_loss, batch_D_loss], [real_score, fake_score, sample_acc, argmax_acc, sample_rewards.mean().item(), argmax_rewards.mean().item()]
         
 class Translator(nn.Module):
     """
