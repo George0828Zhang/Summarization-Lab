@@ -947,13 +947,28 @@ class BigBird():
                     'all_rewards':self.all_rewards
                     },save_path)
     
-    def eval_iter(self, src, src_mask, max_len, real_data, sentiment_label):
+    def eval_iter(self, src, src_mask, max_len, real_data, ct, verbose = 1):
         with torch.no_grad():
             summary_sample, summary_log_values, critic_values, summary_log_probs = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'], mode = 'sample')
-            rewards, acc, label = self.classifier(summary_sample, sentiment_label, self.dictionary['[SEP]'])
+            summary_mask = (summary_sample != self.dictionary['[SEP]']).type_as(summary_sample).unsqueeze(-2)
+            rewards, acc, out = self.reconstructor(summary_sample, summary_mask, src.shape[1], self.dictionary['[CLS]'], src)
+            if verbose == 1 and ct % 100 == 0:
+                print("origin:")
+                self.indicies2string(src[0])
+                print("summary:")
+                self.indicies2string(summary_sample[0])
+                print("real summary:")
+                self.indicies2string(real_data[0])
+                print("reconsturct out:")
+                self.indicies2string(out[0])
+
+    #             print("sentiment:",label[0].item())
+    #             print("y:",sentiment_label[0].item())
+    #            print("reward:",rewards[0].item())
+                print("")
             return acc, rewards.mean().item()
     
-    def run_iter(self, src, src_mask, max_len, real_data, sentiment_label, writer, D_iters = 5, D_toggle = 'On', verbose = 1):
+    def run_iter(self, src, src_mask, max_len, real_data, writer, D_iters = 5, D_toggle = 'On', verbose = 1):
         #summary_logits have some problem
 
         
@@ -974,7 +989,7 @@ class BigBird():
         
         
         summary_mask = (summary_sample != self.dictionary['[SEP]']).type_as(summary_sample).unsqueeze(-2)
-        rewards, acc = self.reconstructor(summary_sample, summary_mask, src.shape[1], self.dictionary['[CLS]'], src)
+        rewards, acc, out = self.reconstructor(summary_sample, summary_mask, src.shape[1], self.dictionary['[CLS]'], src)
         
         self.optimizer_R.zero_grad()
         RL_loss = self.RL_scale * self.compute(rewards, summary_log_values, critic_values)
@@ -1014,6 +1029,8 @@ class BigBird():
             self.indicies2string(summary_sample[0])
             print("real summary:")
             self.indicies2string(real_data[0])
+            print("reconsturct out:")
+            self.indicies2string(out[0])
 #             print("sentiment:",label[0].item())
 #             print("y:",sentiment_label[0].item())
 #            print("reward:",rewards[0].item())
@@ -1064,6 +1081,8 @@ class Translator(nn.Module):
         log_values = torch.stack(log_values,1)
         critics = torch.stack(critics,1)
         all_log_probs = torch.stack(all_log_probs,1)
+        
+        
         return ys, log_values, critics, all_log_probs
     
     def encode(self, src, src_mask):
@@ -1129,22 +1148,21 @@ class Reconstructor(nn.Module):
         #mode == 'sample
         for i in range(max_len):
             out = self.decode(memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src_mask))
-            log_probs = self.generator(out[:, -1, :])             
-            #values, _ = torch.max(log_probs, dim=-1, keepdim=True)
-            #next_words = torch.distributions.Categorical(logits=log_probs).sample()
-            #ys = torch.cat((ys, next_words.unsqueeze(1)), dim=1)
-            ys = torch.cat((ys, y[:,i].unsqueeze(-1)), dim = 1)
+            log_probs = self.generator(out[:, -1, :])
+            if( i < max_len - 1):
+                ys = torch.cat((ys, y[:,i+1].unsqueeze(-1)), dim = 1)
             logits.append(log_probs)
             
         logits = torch.stack(logits, 1)
         loss = self.criterion(logits.view(batch_size * max_len, -1), y.view(batch_size * max_len))
         
+
         #reconstruction with 100 len seen as 1 reward, and summary with 10 len seen as action
         #loss = 
         loss = loss.view(batch_size,-1).mean(-1)
         acc = ((logits.argmax(-1)) == y).type_as(logits).mean()
         
-        return -loss, acc
+        return -loss, acc, logits.argmax(-1)
         
     def encode(self, src, src_mask):
         return self.encoder(self.src_embed(src), src_mask)
