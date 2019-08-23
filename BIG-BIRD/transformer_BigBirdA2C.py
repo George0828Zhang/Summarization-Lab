@@ -919,8 +919,11 @@ class BigBird():
         self.discriminator.eval()
     
     def load(self, load_path):
-        print('load Bird from', load_path)
-        loader = torch.load(load_path)
+        print('load Bird from', load_path)       
+        if str(self.device) == 'cpu':
+            loader = torch.load(load_path, map_location=lambda storage, location: storage)
+        else:
+            loader = torch.load(load_path)
         self.generator.load_state_dict(loader['generator'])
         self.discriminator.load_state_dict(loader['discriminator'])
         self.reconstructor.load_state_dict(loader['reconstructor'])

@@ -119,12 +119,12 @@ class Generator(nn.Module):
         """
         y = self.gumbel_softmax_sample(logits, temperature)
         shape = y.size()
-        _, ind = y.max(dim=-1)
+        values, ind = y.max(dim=-1)
         y_hard = torch.zeros_like(y).view(-1, shape[-1])
         y_hard.scatter_(1, ind.view(-1, 1), 1)
         y_hard = y_hard.view(*shape)
         y_hard = (y_hard - y).detach() + y
-        return y_hard.view(logits.shape[0], -1)
+        return y_hard.view(logits.shape[0], -1), ind, values, y
 
 class CriticNet(nn.Module):
     def __init__(self, d_model):
@@ -977,7 +977,7 @@ class BigBird():
     
     def eval_iter(self, src, src_mask, max_len, real_data, ct, verbose = 1):
         with torch.no_grad():
-            summary_sample, summary_log_values, critic_values, summary_log_probs = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'], mode = 'sample')
+            summary_sample, summary_log_values, critic_values, summary_log_probs, gumbel_one_hot = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'], mode = 'sample')
             summary_mask = (summary_sample != self.dictionary['[SEP]']).type_as(summary_sample).unsqueeze(-2)
             rewards, acc, out = self.reconstructor(summary_sample, summary_mask, src.shape[1], self.dictionary['[CLS]'], src)
             if verbose == 1 and ct % 100 == 0:
@@ -1001,12 +1001,12 @@ class BigBird():
 
         
         #summary = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'])
-        summary_sample, summary_log_values, critic_values, summary_log_probs = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'])
+        summary_sample, summary_log_values, critic_values, summary_log_probs, gumbel_one_hot = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'])
         
         batch_D_loss = 0
         if(D_toggle == 'On'):
             for i in range(D_iters):
-                batch_d_loss, real_score, fake_score = self.train_D(summary_log_probs, self._to_one_hot(real_data, len(self.dictionary)))
+                batch_d_loss, real_score, fake_score = self.train_D(gumbel_one_hot, self._to_one_hot(real_data, len(self.dictionary)))
                 batch_D_loss += batch_d_loss
         
         batch_D_loss = batch_D_loss/D_iters
@@ -1050,7 +1050,7 @@ class BigBird():
                 os.makedirs("./Nest")
             self.save("./Nest/NewbornBirdA2C_GumbelSoftmax")
         
-        if verbose == 1 and self.total_steps % 3000 == 0:
+        if verbose == 1 and self.total_steps % 100 == 0:
             print("origin:")
             self.indicies2string(src[0])
             print("summary:")
@@ -1082,7 +1082,7 @@ class Translator(nn.Module):
         self.generator = generator
         self.critic_net = critic_net
         
-    def forward(self, src, src_mask, max_len, start_symbol, mode = 'sample'):
+    def forward(self, src, src_mask, max_len, start_symbol, mode = 'gumbel_softmax_sample'):
         "Take in and process masked src and target sequences."
         
         batch_size = src.shape[0]
@@ -1092,28 +1092,24 @@ class Translator(nn.Module):
         log_values = []
         critics = []
         all_log_probs = []
+        gumbel_one_hots = []
         for i in range(max_len):
             out = self.decode(memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src_mask))
             #Gumbel softmax
-            log_probs = self.generator(out[:, -1, :], mode = 'gumbel_softmax')
-            critic = self.critic_net(out[:, -1, :])
-            
-            if mode == 'argmax':
-                values, next_words = torch.max(log_probs, dim=-1, keepdim=True)
-            if mode == 'sample':
-                m = torch.distributions.Categorical(logits=log_probs)
-                next_words = m.sample()
-                values = m.log_prob(next_words)    
-
-            ys = torch.cat((ys, next_words.view(batch_size, 1)), dim=1)
+            one_hot, next_words, values, log_probs = self.generator(out[:, -1, :], mode = 'gumbel_softmax')
+            critic = self.critic_net(out[:, -1, :])      
+            ys = torch.cat((ys, next_words.view(batch_size, -1)), dim=1)
             log_values.append(values)
             critics.append(critic)
             all_log_probs.append(log_probs)
+            gumbel_one_hots.append(one_hot)
         log_values = torch.stack(log_values,1)
         critics = torch.stack(critics,1)
         all_log_probs = torch.stack(all_log_probs,1)
-              
-        return ys, log_values, critics, all_log_probs
+        gumbel_one_hots = torch.stack(gumbel_one_hots, 1)
+
+        
+        return ys, log_values, critics, all_log_probs, gumbel_one_hots
     
     def encode(self, src, src_mask):
         return self.encoder(self.src_embed(src), src_mask)
