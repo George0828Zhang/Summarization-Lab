@@ -907,7 +907,6 @@ class BigBird():
         self.real_scores = loader['real_scores']
         self.fake_scores = loader['fake_scores']
         self.total_steps = loader['total_steps']
-        self.all_rewards = loader['all_rewards']
     
     def save(self, save_path):
         print('lay egg to ./Nest ... save as', save_path)
@@ -920,7 +919,6 @@ class BigBird():
                     'real_scores':self.real_scores,
                     'fake_scores':self.fake_scores,
                     'total_steps':self.total_steps,
-                    'all_rewards':self.all_rewards
                     },save_path)
     
     def run_iter(self, src, src_mask, max_len, real_data, sentiment_label, writer, D_iters = 5, D_toggle = 'On', verbose = 1):
@@ -977,12 +975,12 @@ class BigBird():
         
         self.total_steps += 1
         
-        if self.total_steps % 1000 == 0:
+        if self.total_steps % 10 == 0:
             if not os.path.exists("./Nest"):
                 os.makedirs("./Nest")
             self.save("./Nest/NewbornBird_PG")
         
-        if verbose == 1 and self.total_steps % 1000 == 0:
+        if verbose == 1 and self.total_steps % 100 == 0:
             print("origin:")
             self.indicies2string(src[0])
             print("summary(argmax):")
