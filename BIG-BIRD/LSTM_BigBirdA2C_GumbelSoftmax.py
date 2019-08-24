@@ -913,6 +913,8 @@ class BigBird():
         # TODO:
         cummulative_loss = 0
         # compute loss
+        #print(batch_rewards.shape)
+        #print(critic_values.shape)
         for i, reward in enumerate(batch_rewards):
             R = reward
             loss = []
@@ -1013,11 +1015,13 @@ class BigBird():
         
         batch_G_loss = 0 
         if(D_toggle == 'On'):
-            batch_G_loss = self.train_G(summary_log_probs)          
+            #print(summary_log_probs.shape)
+            #print(gumbel_one_hot.shape)
+            batch_G_loss = self.train_G(gumbel_one_hot)          
         
         
         summary_mask = (summary_sample != self.dictionary['[SEP]']).type_as(summary_sample).unsqueeze(-2)
-        rewards, acc, out = self.reconstructor(summary_sample, summary_mask, src.shape[1], self.dictionary['[CLS]'], src)
+        rewards, acc, out = self.reconstructor(summary_sample, summary_mask, src.shape[1], self.dictionary['[CLS]'], src, mode='sample')
         
         self.optimizer_R.zero_grad()
         RL_loss = self.RL_scale * self.compute(rewards, summary_log_values, critic_values)
@@ -1045,12 +1049,12 @@ class BigBird():
         
         self.total_steps += 1
         
-        if self.total_steps % 1000 == 0:
+        if self.total_steps % 500 == 0:
             if not os.path.exists("./Nest"):
                 os.makedirs("./Nest")
-            self.save("./Nest/NewbornBirdA2C_GumbelSoftmax")
+            self.save("./Nest/NewbornBirdA2C_LSTM_GumbelSoftmax")
         
-        if verbose == 1 and self.total_steps % 100 == 0:
+        if verbose == 1 and self.total_steps % 1000 == 0:
             print("origin:")
             self.indicies2string(src[0])
             print("summary:")
@@ -1085,7 +1089,7 @@ class LSTMEncoder(nn.Module):
     
 
 class LSTM_Gumbel_Encoder_Decoder(nn.Module):
-    def __init__(self, hidden_dim, emb_dim, input_len, output_len, voc_size, critic_net, eps=1e-8):
+    def __init__(self, hidden_dim, emb_dim, input_len, output_len, voc_size, critic_net, device, eps=1e-8):
         super().__init__()
         
         self.hidden_dim = hidden_dim
@@ -1101,6 +1105,8 @@ class LSTM_Gumbel_Encoder_Decoder(nn.Module):
         self.decoder = nn.LSTM(emb_dim, hidden_dim*2, num_layers=1, batch_first=True)
         
         self.critic_net = critic_net
+        
+        self.device = device
         
         self.attention_softmax = nn.Softmax(dim=1)
         
@@ -1129,7 +1135,12 @@ class LSTM_Gumbel_Encoder_Decoder(nn.Module):
         out_h, out_c = (h, c)
         ys = torch.ones(batch_size, 1).fill_(start_symbol).type_as(x.data)
         
-        for i in range(self.output_len):
+        log_values = []
+        critics = []
+        all_log_probs = []
+        gumbel_one_hots = []
+        
+        for i in range(self.output_len-1):
             ans_emb = self.emb_layer(ys[:,-1]).view(batch_size, 1, self.emb_dim)
             out, (out_h, out_c) = self.decoder(ans_emb, (out_h, out_c))
             critic = self.critic_net(out) 
@@ -1139,10 +1150,17 @@ class LSTM_Gumbel_Encoder_Decoder(nn.Module):
             
             context_vector = torch.bmm(attention.view(batch_size, 1, self.input_len), memory)
             
-            feature = torch.cat((out, context_vector), -1)
-
+            feature = torch.cat((out, context_vector), -1).view(batch_size, -1)
+            
             one_hot, next_words, values, log_probs = self.gumbel_softmax(self.pro_layer(feature), temp)
-                
+            
+#             print(feature.shape)
+#             print(one_hot.shape)
+#             print(next_words.shape)
+#             print(values.shape)
+#             print(log_probs.shape)
+#             input("")
+            
             ys = torch.cat((ys, next_words.view(batch_size, 1)), dim=1)
                  
             log_values.append(values)
@@ -1151,7 +1169,7 @@ class LSTM_Gumbel_Encoder_Decoder(nn.Module):
             gumbel_one_hots.append(one_hot)
             
         log_values = torch.stack(log_values,1)
-        critics = torch.stack(critics,1)
+        critics = torch.stack(critics,1).squeeze(-1)
         all_log_probs = torch.stack(all_log_probs,1)
         gumbel_one_hots = torch.stack(gumbel_one_hots, 1)
         
@@ -1329,11 +1347,12 @@ class LSTM_Normal_Encoder_Decoder(nn.Module):
         
         self.pro_layer = nn.Sequential(
             nn.Linear(hidden_dim*4, voc_size, bias=True),
+            nn.LogSoftmax(-1)
         )
 
-        self.criterion = torch.nn.CrossEntropyLoss(ignore_index = pad_index, reduction='none')
+        self.criterion = torch.nn.NLLLoss(reduction='none', ignore_index = pad_index)
         
-    def forward(self, x, src_mask, max_len, start_symbol, mode = 'argmax', temp = 2.0):
+    def forward(self, x, src_mask, max_len, start_symbol, y, mode = 'argmax', temp = 2.0):
         
         batch_size = x.shape[0]
         device = x.device
@@ -1358,16 +1377,14 @@ class LSTM_Normal_Encoder_Decoder(nn.Module):
         for i in range(self.output_len):
             ans_emb = self.emb_layer(ys[:,-1]).view(batch_size, 1, self.emb_dim)
             out, (out_h, out_c) = self.decoder(ans_emb, (out_h, out_c))
-            critic = self.critic_net(out) 
-            
             attention = torch.bmm(memory, out.transpose(1, 2)).view(batch_size, self.input_len)
             attention = self.attention_softmax(attention)            
             
             context_vector = torch.bmm(attention.view(batch_size, 1, self.input_len), memory)
             
-            feature = torch.cat((out, context_vector), -1)
+            feature = torch.cat((out, context_vector), -1).view(batch_size, -1)
 
-            distri = self.pro_layer(feature)
+            log_probs = self.pro_layer(feature)
             
             if mode == 'argmax':
                 values, next_words = torch.max(log_probs, dim=-1, keepdim=True)
@@ -1381,6 +1398,9 @@ class LSTM_Normal_Encoder_Decoder(nn.Module):
             
         logits = torch.stack(logits, 1)
         loss = self.criterion(logits.view(batch_size * max_len, -1), y.view(batch_size * max_len))
+        
+        loss = loss.view(batch_size,-1).mean(-1)
+        acc = ((logits.argmax(-1)) == y).type_as(logits).mean()
 
         
         return -loss, acc, logits.argmax(-1)         
