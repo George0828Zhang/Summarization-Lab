@@ -883,15 +883,8 @@ class BigBird():
         #print(fake_loss)
         #input("")
         batch_d_loss = -real_score + fake_score #+ self.calc_gradient_penalty(self.discriminator, real_datas, fake_datas)
-        batch_d_loss.backward(retain_graph=True);
         
-        #Clip critic weights
-        for p in self.discriminator.parameters():
-            p.data.clamp_(-self.clip_value, self.clip_value)
-        
-        self.optimizer_D.step();
-        
-        return batch_d_loss.item(), real_score.item(), fake_score.item()
+        return batch_d_loss, real_score.item(), fake_score.item()
     
     def train_G(self, fake_datas): 
 
@@ -1010,8 +1003,15 @@ class BigBird():
             for i in range(D_iters):
                 batch_d_loss, real_score, fake_score = self.train_D(gumbel_one_hot, self._to_one_hot(real_data, len(self.dictionary)))
                 batch_D_loss += batch_d_loss
+            batch_d_loss.backward(retain_graph=True);
         
-        batch_D_loss = batch_D_loss/D_iters
+            #Clip critic weights
+            for p in self.discriminator.parameters():
+                p.data.clamp_(-self.clip_value, self.clip_value)
+        
+            self.optimizer_D.step();
+        
+        batch_D_loss = batch_D_loss.item()/D_iters
         
         batch_G_loss = 0 
         if(D_toggle == 'On'):

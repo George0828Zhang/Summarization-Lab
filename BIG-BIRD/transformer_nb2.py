@@ -828,23 +828,17 @@ class BigBird():
         return gradient_penalty
         
     def train_D(self, fake_datas, real_datas):
-        ## train discriminator
-                    
+        ## train discriminator       
+        #print(real_datas.shape)
+        #print(fake_datas.shape)
         real_score = torch.mean(self.discriminator(real_datas)) 
         fake_score = torch.mean(self.discriminator(fake_datas))
         #print(real_loss)
         #print(fake_loss)
         #input("")
-        batch_d_loss = -real_score + fake_score # + self.calc_gradient_penalty(self.discriminator, real_datas, fake_datas)
-        batch_d_loss.backward();
+        batch_d_loss = -real_score + fake_score #+ self.calc_gradient_penalty(self.discriminator, real_datas, fake_datas)
         
-        #Clip critic weights
-#         for p in self.discriminator.parameters():
-#             p.data.clamp_(-self.clip_value, self.clip_value)
-        
-        self.optimizer_D.step();
-        
-        return batch_d_loss.item(), real_score.item(), fake_score.item()
+        return batch_d_loss, real_score.item(), fake_score.item()
     
     def train_G(self, fake_datas): 
 
@@ -856,7 +850,14 @@ class BigBird():
         self.optimizer_G.step()
 
         return batch_g_loss.item()      
-        
+    def _to_one_hot(self, y, n_dims):
+
+        scatter_dim = len(y.size())
+
+        y_tensor = y.to(self.device).long().view(*y.size(), -1)
+        zeros = torch.zeros(*y.size(), n_dims).to(self.device)
+
+        return zeros.scatter(scatter_dim, y_tensor, 1)    
         
     def compute(self, batch_rewards, saved_log_probs):
         # TODO:
@@ -925,16 +926,23 @@ class BigBird():
         #summary_logits have some problem
 
         
-        summary_argmax , argmax_log_values = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'])
-        summary_sample, sample_log_values = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'], mode = 'sample')
+        summary_argmax , argmax_log_values, _ = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'], mode='argmax')
+        summary_sample, sample_log_values, summary_log_probs = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'], mode = 'sample')
 
         batch_D_loss = 0
         if(D_toggle == 'On'):
-            for i in range(D_iters):          
-                batch_d_loss, real_score, fake_score = self.train_D(summary_argmax, real_data)
+            for i in range(D_iters):
+                batch_d_loss, real_score, fake_score = self.train_D(gumbel_one_hot, self._to_one_hot(real_data, len(self.dictionary)))
                 batch_D_loss += batch_d_loss
+            batch_d_loss.backward(retain_graph=True);
         
-        batch_D_loss = batch_D_loss/D_iters
+            #Clip critic weights
+            for p in self.discriminator.parameters():
+                p.data.clamp_(-self.clip_value, self.clip_value)
+        
+            self.optimizer_D.step();
+        
+        batch_D_loss = batch_D_loss.item()/D_iters
         
         batch_G_loss = 0 
         if(D_toggle == 'On'):
@@ -946,10 +954,10 @@ class BigBird():
         #loss_argmax, argmax_acc, ans = self.classifier(summary, sentiment_label, self.dictionary['[SEP]'])
         
         summary_mask = (summary_argmax != self.dictionary['[SEP]']).type_as(summary_argmax).unsqueeze(-2)
-        argmax_rewards, argmax_acc = self.reconstructor(summary_argmax, summary_mask, src.shape[1], self.dictionary['[CLS]'], src)
+        argmax_rewards, argmax_acc, argmax_out = self.reconstructor(summary_argmax, summary_mask, src.shape[1], self.dictionary['[CLS]'], src)
         
         summary_mask = (summary_sample != self.dictionary['[SEP]']).type_as(summary_sample).unsqueeze(-2)
-        sample_rewards, sample_acc = self.reconstructor(summary_sample, summary_mask, src.shape[1], self.dictionary['[CLS]'], src)
+        sample_rewards, sample_acc, sample_out = self.reconstructor(summary_sample, summary_mask, src.shape[1], self.dictionary['[CLS]'], src)
         
         
         RL_loss_sample = self.RL_scale * self.compute(sample_rewards, sample_log_values)
@@ -975,7 +983,7 @@ class BigBird():
         
         self.total_steps += 1
         
-        if self.total_steps % 10 == 0:
+        if self.total_steps % 100 == 0:
             if not os.path.exists("./Nest"):
                 os.makedirs("./Nest")
             self.save("./Nest/NewbornBird_PG")
@@ -989,6 +997,10 @@ class BigBird():
             self.indicies2string(summary_sample[0])
             print("real summary:")
             self.indicies2string(real_data[0])
+            print("reconstruct(argmax):")
+            self.indices2string(argmax_out[0])
+            print("reconstruct(sample):")
+            self.indices2string(sample_out[0])
             print("")
 #         for name, param in self.generator.named_parameters():
 #             writer.add_histogram(name, param.clone().cpu().data.numpy(), self.total_steps)
@@ -1091,6 +1103,8 @@ class PointerGenerator(nn.Module):
         
         ys = torch.ones(batch_size, 1).fill_(start_symbol).type_as(x.data)
         
+        all_log_probs = []
+        
         for i in range(self.output_len):
             ans_emb = self.emb_layer(ys[:,-1]).view(batch_size, 1, self.emb_dim)
             out, (out_h, out_c) = self.decoder(ans_emb, (out_h, out_c))
@@ -1124,12 +1138,14 @@ class PointerGenerator(nn.Module):
                 next_words = m.sample()
                 values = m.log_prob(next_words)
                 
+            all_log_probs.append(log_probs)    
                 
             ys = torch.cat((ys, next_words.view(batch_size, 1)), dim=1)
             
             log_probs_seq = values if i == 0 else torch.cat((log_probs_seq, values), dim=1)
 
-            return ys, log_probs_seq
+        all_log_probs = torch.stack(all_log_probs,1)
+        return ys, log_probs_seq, all_log_probs
     
 class BERT(nn.Module):    
     def __init__(self, transformer_encoder, src_embed, padding_index):
@@ -1235,7 +1251,7 @@ class Reconstructor(nn.Module):
         loss = loss.view(batch_size,-1).mean(-1)
         acc = ((logits.argmax(-1)) == y).type_as(logits).mean()
         
-        return -loss, acc
+        return -loss, acc, logits.argmax(-1)
         
     def encode(self, src, src_mask):
         return self.encoder(self.src_embed(src), src_mask)
@@ -1244,15 +1260,19 @@ class Reconstructor(nn.Module):
         return self.decoder(self.tgt_embed(tgt), memory, src_mask, tgt_mask)
     
 class Discriminator(nn.Module):
-    def __init__(self, BERT):
+    def __init__(self, transformer_encoder, hidden_dim, vocab_sz, padding_index):
         super(Discriminator, self).__init__()
-        self.BERT = BERT
         
-        self.linear = nn.Linear(self.BERT.outsize, 1)
+        self.padding_index = padding_index
+        
+        self.disguise_embed = nn.Linear(vocab_sz, hidden_dim)  
+        self.transformer_encoder = transformer_encoder
+        self.linear = nn.Linear(self.transformer_encoder.layers[-1].size, 1)
         #self.sigmoid = nn.Sigmoid()
     
     def forward(self, x):
-        x = self.BERT(x)
+        src_mask = (x.argmax(-1) != self.padding_index).type_as(x).unsqueeze(-2)
+        x = self.transformer_encoder(self.disguise_embed(x), src_mask)
         score = self.linear(x)
         return score
         
