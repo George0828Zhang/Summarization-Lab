@@ -1094,11 +1094,11 @@ class LSTM_Gumbel_Encoder_Decoder(nn.Module):
         
         self.hidden_dim = hidden_dim
         self.emb_dim = emb_dim
-        self.input_len = input_len
-        self.output_len = output_len
-        self.voc_size = voc_size
-        self.teacher_prob = 1.
-        self.epsilon = eps
+        #self.input_len = input_len
+        #self.output_len = output_len
+        #self.voc_size = voc_size
+        #self.teacher_prob = 1.
+        #self.epsilon = eps
         
         self.emb_layer = nn.Embedding(voc_size, emb_dim)
         self.encoder = nn.LSTM(emb_dim, hidden_dim, num_layers=1, batch_first=True, bidirectional=True)
@@ -1118,6 +1118,7 @@ class LSTM_Gumbel_Encoder_Decoder(nn.Module):
     def forward(self, x, src_mask, max_len, start_symbol, mode = 'argmax', temp = 2.0):
         
         batch_size = x.shape[0]
+        input_len = x.shape[1]
         device = x.device
         
         # encoder
@@ -1140,15 +1141,15 @@ class LSTM_Gumbel_Encoder_Decoder(nn.Module):
         all_log_probs = []
         gumbel_one_hots = []
         
-        for i in range(self.output_len-1):
+        for i in range(max_len-1):
             ans_emb = self.emb_layer(ys[:,-1]).view(batch_size, 1, self.emb_dim)
             out, (out_h, out_c) = self.decoder(ans_emb, (out_h, out_c))
             critic = self.critic_net(out) 
             
-            attention = torch.bmm(memory, out.transpose(1, 2)).view(batch_size, self.input_len)
+            attention = torch.bmm(memory, out.transpose(1, 2)).view(batch_size, input_len)
             attention = self.attention_softmax(attention)            
             
-            context_vector = torch.bmm(attention.view(batch_size, 1, self.input_len), memory)
+            context_vector = torch.bmm(attention.view(batch_size, 1, input_len), memory)
             
             feature = torch.cat((out, context_vector), -1).view(batch_size, -1)
             
@@ -1333,11 +1334,11 @@ class LSTM_Normal_Encoder_Decoder(nn.Module):
         
         self.hidden_dim = hidden_dim
         self.emb_dim = emb_dim
-        self.input_len = input_len
-        self.output_len = output_len
-        self.voc_size = voc_size
-        self.teacher_prob = 1.
-        self.epsilon = eps
+        #self.input_len = input_len
+        #self.output_len = output_len
+        #self.voc_size = voc_size
+        #self.teacher_prob = 1.
+        #self.epsilon = eps
         
         self.emb_layer = nn.Embedding(voc_size, emb_dim)
         self.encoder = nn.LSTM(emb_dim, hidden_dim, num_layers=1, batch_first=True, bidirectional=True)
@@ -1355,6 +1356,7 @@ class LSTM_Normal_Encoder_Decoder(nn.Module):
     def forward(self, x, src_mask, max_len, start_symbol, y, mode = 'argmax', temp = 2.0):
         
         batch_size = x.shape[0]
+        input_len = x.shape[1]
         device = x.device
         
         # encoder
@@ -1374,13 +1376,13 @@ class LSTM_Normal_Encoder_Decoder(nn.Module):
         
         logits = []
         
-        for i in range(self.output_len):
+        for i in range(max_len):
             ans_emb = self.emb_layer(ys[:,-1]).view(batch_size, 1, self.emb_dim)
             out, (out_h, out_c) = self.decoder(ans_emb, (out_h, out_c))
-            attention = torch.bmm(memory, out.transpose(1, 2)).view(batch_size, self.input_len)
+            attention = torch.bmm(memory, out.transpose(1, 2)).view(batch_size, input_len)
             attention = self.attention_softmax(attention)            
             
-            context_vector = torch.bmm(attention.view(batch_size, 1, self.input_len), memory)
+            context_vector = torch.bmm(attention.view(batch_size, 1, input_len), memory)
             
             feature = torch.cat((out, context_vector), -1).view(batch_size, -1)
 
@@ -1403,7 +1405,53 @@ class LSTM_Normal_Encoder_Decoder(nn.Module):
         acc = ((logits.argmax(-1)) == y).type_as(logits).mean()
 
         
-        return -loss, acc, logits.argmax(-1)         
+        return -loss, acc, logits.argmax(-1)    
+    
+    def pretrian_forward(self, x, y, mode = 'argmax'):
+        
+        batch_size = x.shape[0]
+        input_len = x.shape[1]
+        device = x.device
+        
+        # encoder
+        x_emb = self.emb_layer(x)
+        memory, (h, c) = self.encoder(x_emb)
+        h = h.transpose(0, 1).contiguous()
+        c = c.transpose(0, 1).contiguous()
+        h = h.view(batch_size, 1, h.shape[-1]*2)
+        c = c.view(batch_size, 1, c.shape[-1]*2)
+        h = h.transpose(0, 1).contiguous()
+        c = c.transpose(0, 1).contiguous()        
+
+        
+        ## decoder
+        out_h, out_c = (h, c)
+        max_len = y.shape[1]
+        logits = []
+        for i in range(max_len):     
+            ans_emb = self.emb_layer(y[:,i]).view(batch_size, 1, self.emb_dim)
+            out, (out_h, out_c) = self.decoder(ans_emb, (out_h, out_c))
+            attention = torch.bmm(memory, out.transpose(1, 2)).view(batch_size, input_len)
+            attention = self.attention_softmax(attention)            
+            
+            context_vector = torch.bmm(attention.view(batch_size, 1, input_len), memory)
+            
+            feature = torch.cat((out, context_vector), -1).view(batch_size, -1)
+
+            log_probs = self.pro_layer(feature)
+            
+            if mode == 'argmax':
+                values, next_words = torch.max(log_probs, dim=-1, keepdim=True)
+            if mode == 'sample':
+                m = torch.distributions.Categorical(logits=log_probs)
+                next_words = m.sample()
+                values = m.log_prob(next_words)
+                
+            logits.append(log_probs)
+            
+        logits = torch.stack(logits, 1)
+        
+        return logits, logits.argmax(-1)  
 
 class Discriminator(nn.Module):
     def __init__(self, transformer_encoder, hidden_dim, vocab_sz, padding_index):
