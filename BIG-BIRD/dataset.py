@@ -20,25 +20,43 @@ class Dataset(data.Dataset):
             data_list = data_list[:cutoff]
         # idata -> list
         self.size = len(sum_list)
-        self.sum_len = 0
+            
+        self.src = []
+        self.tgt = []
         
-        self.documents = np.full((self.size, INPUT_MAX), pad_idx, dtype=np.int64)
-        self.summaries = np.full((self.size, OUTPUT_MAX), pad_idx, dtype=np.int64)
+        self.pad_idx = pad_idx
         
         for i in tqdm(range(self.size)):
-            src = data_list[i]
-            tgt = sum_list[i]
-            cp_src = min(len(src), INPUT_MAX)
-            cp_tgt = min(len(tgt), OUTPUT_MAX)
-            
-            self.documents[i,:cp_src] = src[:cp_src]
-            self.summaries[i,:cp_tgt] = tgt[:cp_tgt]
+            src = data_list[i][:INPUT_MAX]
+            tgt = sum_list[i][:OUTPUT_MAX]
+            self.src.append(src)
+            self.tgt.append(tgt)
+                    
+        idx = np.argsort([len(x) for x in self.src])[::-1] # descending
         
+        self.src = [ self.src[i] for i in idx]
+        self.tgt = [ self.tgt[i] for i in idx]
+        
+    def np_jagged(self, array):
+        MAX = max([len(i) for i in array])
+        out = [ a + [self.pad_idx]*(MAX-len(a)) if len(a) < MAX else a[:MAX] for a in array ]
+        return np.asarray(out, dtype=np.int64)
+            
      
-    def __len__(self):
-        return self.size
-    def __getitem__(self, index):
-        return torch.from_numpy(self.documents[index]), torch.tensor([self.scores[index]]), torch.from_numpy(self.summaries[index])
+    def make_generator(self, batch_size, shuffle=True):
+        # preprocess
+        total = self.size // batch_size
+        if total * batch_size < self.size:
+            total += 1
+        
+        iters = np.random.randint(low=0,high=total,size=total) if shuffle else range(total)
+        for i in iters:            
+            fr = i*batch_size
+            to = min(fr+batch_size, self.size)
+            src = self.np_jagged(self.src[fr:to])
+            tgt = self.np_jagged(self.tgt[fr:to])
+            yield torch.from_numpy(src), torch.from_numpy(tgt)
+            
 
 class PretrainDataset(data.Dataset):    
     def __init__(self, data_name, INPUT_MAX, OUTPUT_MAX, pad_idx, cutoff=None):
@@ -51,36 +69,54 @@ class PretrainDataset(data.Dataset):
             data_list = data_list[:cutoff]
         # idata -> list
         self.size = len(data_list)
+                
+        self.src = []
+        self.tgt = []
         
-        self.documents = np.full((self.size, INPUT_MAX), pad_idx, dtype=np.int64)
-        self.summaries = np.full((self.size, INPUT_MAX), pad_idx, dtype=np.int64)
+        self.pad_idx = pad_idx
         
         for i in tqdm(range(self.size)):
-            src = list(data_list[i])
-            tgt = data_list[i]
+            src = list(data_list[i])[:INPUT_MAX]
+            tgt = data_list[i][:OUTPUT_MAX]
             random.shuffle(src)
-            cp_src = min(len(src), INPUT_MAX)
-            cp_tgt = min(len(tgt), INPUT_MAX)
+            self.src.append(src)
+            self.tgt.append(tgt)
+                    
+        idx = np.argsort([len(x) for x in self.tgt])[::-1] # descending
+        
+        self.src = [ self.src[i] for i in idx]
+        self.tgt = [ self.tgt[i] for i in idx]
+        
+    def np_jagged(self, array):
+        MAX = max([len(i) for i in array])
+        out = [ a + [self.pad_idx]*(MAX-len(a)) if len(a) < MAX else a[:MAX] for a in array ]
+        return np.asarray(out, dtype=np.int64)
             
-            self.documents[i,:cp_src] = src[:cp_src]
-            self.summaries[i,:cp_tgt] = tgt[:cp_tgt]
-        
-        print(self[0])
-        
      
-    def __len__(self):
-        return self.size
-    def __getitem__(self, index):
-        return torch.from_numpy(self.documents[index]), torch.from_numpy(self.summaries[index])
+    def make_generator(self, batch_size, shuffle=True):
+        # preprocess
+        total = self.size // batch_size
+        if total * batch_size < self.size:
+            total += 1
+        
+        iters = np.random.randint(low=0,high=total,size=total) if shuffle else range(total)
+        for i in iters:            
+            fr = i*batch_size
+            to = min(fr+batch_size, self.size)
+            src = self.np_jagged(self.src[fr:to])
+            tgt = self.np_jagged(self.tgt[fr:to])
+            yield torch.from_numpy(src), torch.from_numpy(tgt)
+        
+    
     
 def make_data_generator(data_name, in_max, out_max, padding_idx, batch_size, pretrain=False, cutoff=None, shuffle=True, num_workers=4):    
     if pretrain:
         data_set = PretrainDataset(data_name, in_max, out_max, padding_idx, cutoff)
     else:
         data_set = Dataset(data_name, in_max, out_max, padding_idx, cutoff)
-    
-    params = {'batch_size':batch_size,
-         'shuffle': shuffle,
-         'num_workers': num_workers}
-    generator = data.DataLoader(data_set, **params)
-    return data_set, generator
+    return data_set, data_set.make_generator(batch_size=batch_size, shuffle=shuffle)
+    #params = {'batch_size':batch_size,
+    #     'shuffle': shuffle,
+    #     'num_workers': num_workers}
+    #generator = data.DataLoader(data_set, **params)
+    #return data_set, generator
