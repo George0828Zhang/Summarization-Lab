@@ -782,14 +782,14 @@ class BigBird():
         self.optimizer_R = torch.optim.Adam(list(self.generator.parameters()) + list(self.reconstructor.parameters()), lr=lr_R)
         
         #normal WGAN
-        #self.optimizer_G = torch.optim.RMSprop(self.generator.parameters(), lr=lr_G)
-        #self.optimizer_D = torch.optim.RMSprop(self.discriminator.parameters(), lr=lr_D)
+        self.optimizer_G = torch.optim.RMSprop(self.generator.parameters(), lr=lr_G)
+        self.optimizer_D = torch.optim.RMSprop(self.discriminator.parameters(), lr=lr_D)
         
         #WGAN GP
         
         self.LAMBDA = LAMBDA # Gradient penalty lambda hyperparameter
-        self.optimizer_G = torch.optim.Adam(self.generator.parameters(), lr=lr_G,  betas=(0.0, 0.9))
-        self.optimizer_D = torch.optim.Adam(self.discriminator.parameters(), lr=lr_D,  betas=(0.0, 0.9))
+        #self.optimizer_G = torch.optim.Adam(self.generator.parameters(), lr=lr_G,  betas=(0.0, 0.9))
+        #self.optimizer_D = torch.optim.Adam(self.discriminator.parameters(), lr=lr_D,  betas=(0.0, 0.9))
                
         self.clip_value = clip_value
         
@@ -931,6 +931,7 @@ class BigBird():
 
         batch_D_loss = 0
         if(D_toggle == 'On'):
+            self.optimizer_D.zero_grad()
             for i in range(D_iters):
                 batch_d_loss, real_score, fake_score = self.train_D(gumbel_one_hot, self._to_one_hot(real_data, len(self.dictionary)))
                 batch_D_loss += batch_d_loss

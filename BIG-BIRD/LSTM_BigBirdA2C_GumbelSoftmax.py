@@ -129,7 +129,11 @@ class Generator(nn.Module):
 class CriticNet(nn.Module):
     def __init__(self, d_model):
         super(CriticNet, self).__init__()
-        self.proj = nn.Linear(d_model, 1)
+        self.proj = nn.Sequential(
+                        nn.Linear(d_model, 2 * d_model),
+                        nn.ReLU(),
+                        nn.Linear(2 * d_model, 1),
+                    )
 
     def forward(self, x):
         return self.proj(x).squeeze(1)   
@@ -817,14 +821,14 @@ class BigBird():
         self.optimizer_R = torch.optim.Adam(list(self.generator.parameters()) + list(self.reconstructor.parameters()), lr=lr_R)
         
         #normal WGAN
-        #self.optimizer_G = torch.optim.RMSprop(self.generator.parameters(), lr=lr_D)
-        #self.optimizer_D = torch.optim.RMSprop(self.discriminator.parameters(), lr=lr_C)
+        self.optimizer_G = torch.optim.RMSprop(self.generator.parameters(), lr=lr_G)
+        self.optimizer_D = torch.optim.RMSprop(self.discriminator.parameters(), lr=lr_D)
         
         #WGAN GP
         
-        self.LAMBDA = LAMBDA # Gradient penalty lambda hyperparameter
-        self.optimizer_G = torch.optim.Adam(self.generator.parameters(), lr=lr_G,  betas=(0.0, 0.9))
-        self.optimizer_D = torch.optim.Adam(self.discriminator.parameters(), lr=lr_D,  betas=(0.0, 0.9))
+        #self.LAMBDA = LAMBDA # Gradient penalty lambda hyperparameter
+        #self.optimizer_G = torch.optim.Adam(self.generator.parameters(), lr=lr_G,  betas=(0.0, 0.9))
+        #self.optimizer_D = torch.optim.Adam(self.discriminator.parameters(), lr=lr_D,  betas=(0.0, 0.9))
                
         self.clip_value = clip_value
         
@@ -875,13 +879,13 @@ class BigBird():
     
     def train_D(self, fake_datas, real_datas):
         ## train discriminator       
-        #print(real_datas.shape)
-        #print(fake_datas.shape)
-        real_score = torch.mean(self.discriminator(real_datas)) 
+#         print("real")
+#         print(real_datas[:10])
+        real_score = torch.mean(self.discriminator(real_datas))
+#         print("fake")
+#         print(fake_datas[:10])
         fake_score = torch.mean(self.discriminator(fake_datas))
-        #print(real_loss)
-        #print(fake_loss)
-        #input("")
+
         batch_d_loss = -real_score + fake_score #+ self.calc_gradient_penalty(self.discriminator, real_datas, fake_datas)
         
         return batch_d_loss, real_score.item(), fake_score.item()
@@ -918,11 +922,11 @@ class BigBird():
                 R = self.gamma * R
 
             returns = torch.stack(returns, 0)
-            #advantages = returns - critic_values[i]
+            advantages = returns - critic_values[i]
             #returns = torch.where(returns > 0 , returns, torch.FloatTensor([0.1] * len(returns)));
-            #action_gain = (saved_log_probs[i] * advantages.detach()).mean()
+            action_gain = (saved_log_probs[i] * advantages.detach()).sum()
             value_loss =  F.smooth_l1_loss(returns, critic_values[i])
-            loss = value_loss #- action_gain
+            loss = value_loss - action_gain
             cummulative_loss += loss.mean()
          
         return cummulative_loss/batch_rewards.shape[0]
@@ -1001,13 +1005,15 @@ class BigBird():
         batch_D_loss = 0
         if(D_toggle == 'On'):
             for i in range(D_iters):
+                self.optimizer_D.zero_grad()
+                
                 batch_d_loss, real_score, fake_score = self.train_D(gumbel_one_hot, self._to_one_hot(real_data, len(self.dictionary)))
                 batch_D_loss += batch_d_loss
-            batch_d_loss.backward(retain_graph=True);
-        
-            #Clip critic weights
-            for p in self.discriminator.parameters():
-                p.data.clamp_(-self.clip_value, self.clip_value)
+                batch_d_loss.backward(retain_graph=True);
+
+                #Clip critic weights
+                for p in self.discriminator.parameters():
+                    p.data.clamp_(-self.clip_value, self.clip_value)
         
             self.optimizer_D.step();
         
@@ -1054,7 +1060,7 @@ class BigBird():
                 os.makedirs("./Nest")
             self.save("./Nest/NewbornBirdA2C_LSTM_GumbelSoftmax")
         
-        if verbose == 1 and self.total_steps % 1000 == 0:
+        if verbose == 1 and self.total_steps % 100 == 0:
             print("origin:")
             self.indicies2string(src[0])
             print("summary:")
