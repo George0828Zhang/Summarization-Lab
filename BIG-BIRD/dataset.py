@@ -13,7 +13,6 @@ class Dataset(data.Dataset):
         print("load json done.")
         sum_list = data['summary']
         data_list = data['text']
-        self.scores = np.asarray(data['score'], dtype=np.float64)
         
         if cutoff is not None:
             sum_list = sum_list[:cutoff]
@@ -36,27 +35,24 @@ class Dataset(data.Dataset):
         
         self.src = [ self.src[i] for i in idx]
         self.tgt = [ self.tgt[i] for i in idx]
+        self.scores = np.asarray([data['score'][i] for i in idx], dtype=np.float64)
         
+      
     def np_jagged(self, array):
         MAX = max([len(i) for i in array])
         out = [ a + [self.pad_idx]*(MAX-len(a)) if len(a) < MAX else a[:MAX] for a in array ]
         return np.asarray(out, dtype=np.int64)
-            
-     
-    def make_generator(self, batch_size, shuffle=True):
-        # preprocess
-        total = self.size // batch_size
-        if total * batch_size < self.size:
-            total += 1
-        
-        iters = np.random.randint(low=0,high=total,size=total) if shuffle else range(total)
-        for i in iters:            
-            fr = i*batch_size
-            to = min(fr+batch_size, self.size)
-            src = self.np_jagged(self.src[fr:to])
-            tgt = self.np_jagged(self.tgt[fr:to])
-            yield torch.from_numpy(src), torch.from_numpy(tgt)
-            
+
+    def at(self, i, batch_size=1):
+        fr = i*batch_size
+        to = min(fr+batch_size, self.size)
+        src = self.np_jagged(self.src[fr:to])
+        tgt = self.np_jagged(self.tgt[fr:to])
+        senti = self.scores[fr:to]
+        return torch.from_numpy(src), torch.from_numpy(senti), torch.from_numpy(tgt)
+
+    def __len__(self):
+        return self.size
 
 class PretrainDataset(data.Dataset):    
     def __init__(self, data_name, INPUT_MAX, OUTPUT_MAX, pad_idx, cutoff=None):
@@ -91,21 +87,38 @@ class PretrainDataset(data.Dataset):
         MAX = max([len(i) for i in array])
         out = [ a + [self.pad_idx]*(MAX-len(a)) if len(a) < MAX else a[:MAX] for a in array ]
         return np.asarray(out, dtype=np.int64)
-            
-     
-    def make_generator(self, batch_size, shuffle=True):
+
+    def at(self, i, batch_size=1):
+        fr = i*batch_size
+        to = min(fr+batch_size, self.size)
+        src = self.np_jagged(self.src[fr:to])
+        tgt = self.np_jagged(self.tgt[fr:to])
+        return torch.from_numpy(src), torch.from_numpy(tgt)
+        
+        
+class Loader(object):
+    def __init__(self, dataset, batch_size, shuffle):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        
         # preprocess
-        total = self.size // batch_size
-        if total * batch_size < self.size:
+        total = dataset.size // batch_size
+        if total * batch_size < dataset.size:
             total += 1
         
-        iters = np.random.randint(low=0,high=total,size=total) if shuffle else range(total)
-        for i in iters:            
-            fr = i*batch_size
-            to = min(fr+batch_size, self.size)
-            src = self.np_jagged(self.src[fr:to])
-            tgt = self.np_jagged(self.tgt[fr:to])
-            yield torch.from_numpy(src), torch.from_numpy(tgt)
+        self.total = total
+                    
+    def __iter__(self):
+        self.iters = iter(np.random.randint(low=0,high=self.total,size=self.total) if self.shuffle else range(self.total))
+        return self
+    
+    def __next__(self):
+        return self.next()
+    
+    def next(self):
+        index = next(self.iters)
+        return self.dataset.at(index, self.batch_size)
         
     
     
@@ -114,7 +127,7 @@ def make_data_generator(data_name, in_max, out_max, padding_idx, batch_size, pre
         data_set = PretrainDataset(data_name, in_max, out_max, padding_idx, cutoff)
     else:
         data_set = Dataset(data_name, in_max, out_max, padding_idx, cutoff)
-    return data_set, data_set.make_generator(batch_size=batch_size, shuffle=shuffle)
+    return data_set, Loader(data_set, batch_size, shuffle)
     #params = {'batch_size':batch_size,
     #     'shuffle': shuffle,
     #     'num_workers': num_workers}
