@@ -1094,11 +1094,11 @@ class LSTM_Gumbel_Encoder_Decoder(nn.Module):
         
         self.hidden_dim = hidden_dim
         self.emb_dim = emb_dim
-        self.input_len = input_len
-        self.output_len = output_len
-        self.voc_size = voc_size
-        self.teacher_prob = 1.
-        self.epsilon = eps
+        #self.input_len = input_len
+        #self.output_len = output_len
+        #self.voc_size = voc_size
+        #self.teacher_prob = 1.
+        #self.epsilon = eps
         
         self.emb_layer = nn.Embedding(voc_size, emb_dim)
         self.encoder = nn.LSTM(emb_dim, hidden_dim, num_layers=1, batch_first=True, bidirectional=True)
@@ -1118,6 +1118,7 @@ class LSTM_Gumbel_Encoder_Decoder(nn.Module):
     def forward(self, x, src_mask, max_len, start_symbol, mode = 'argmax', temp = 2.0):
         
         batch_size = x.shape[0]
+        input_len = x.shape[1]
         device = x.device
         
         # encoder
@@ -1140,15 +1141,15 @@ class LSTM_Gumbel_Encoder_Decoder(nn.Module):
         all_log_probs = []
         gumbel_one_hots = []
         
-        for i in range(self.output_len-1):
+        for i in range(max_len-1):
             ans_emb = self.emb_layer(ys[:,-1]).view(batch_size, 1, self.emb_dim)
             out, (out_h, out_c) = self.decoder(ans_emb, (out_h, out_c))
             critic = self.critic_net(out) 
             
-            attention = torch.bmm(memory, out.transpose(1, 2)).view(batch_size, self.input_len)
+            attention = torch.bmm(memory, out.transpose(1, 2)).view(batch_size, input_len)
             attention = self.attention_softmax(attention)            
             
-            context_vector = torch.bmm(attention.view(batch_size, 1, self.input_len), memory)
+            context_vector = torch.bmm(attention.view(batch_size, 1, input_len), memory)
             
             feature = torch.cat((out, context_vector), -1).view(batch_size, -1)
             
