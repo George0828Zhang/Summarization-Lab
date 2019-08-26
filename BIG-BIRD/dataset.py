@@ -110,7 +110,12 @@ class Loader(object):
         self.total = total
                     
     def __iter__(self):
-        self.iters = iter(np.random.randint(low=0,high=self.total,size=self.total) if self.shuffle else range(self.total))
+        if self.shuffle:            
+            r = list(range(1000))
+            random.shuffle(r)
+            self.iters = iter(r)
+        else:
+            self.iters = iter(range(self.total))
         return self
     
     def __next__(self):
