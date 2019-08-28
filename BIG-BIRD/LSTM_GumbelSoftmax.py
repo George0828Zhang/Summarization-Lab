@@ -35,7 +35,7 @@ from torch.autograd import Variable
 import matplotlib.pyplot as plt
 import os
 import torch.autograd as autograd
-
+import wandb
 # Table of Contents
 # 
 # 
@@ -803,7 +803,7 @@ def greedy_decode(model, src, src_mask, max_len, start_symbol):
 #----------------------------------------
 class BigBird():
     #generator is translator here
-    def __init__(self, generator, discriminator, reconstructor, dictionary, gamma = 0.99, clip_value = 0.1, lr_G = 5e-5, lr_D = 5e-5, lr_R = 1e-4, LAMBDA = 10, RL_scale = 100, device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
+    def __init__(self, generator, discriminator, reconstructor, dictionary, gamma = 0.99, clip_value = 0.1, lr_G = 5e-5, lr_D = 5e-5, lr_R = 1e-4, LAMBDA = 10,  TEMP_START = 4.0, TEMP_END = 0.01, device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
         super(BigBird, self).__init__()
         
         self.device = device
@@ -817,7 +817,6 @@ class BigBird():
         self.gamma = gamma
         self.eps = np.finfo(np.float32).eps.item()
         
-        self.RL_scale = RL_scale
         self.optimizer_R = torch.optim.Adam(list(self.generator.parameters()) + list(self.reconstructor.parameters()), lr=lr_R)
         
         #normal WGAN
@@ -831,6 +830,9 @@ class BigBird():
         #self.optimizer_D = torch.optim.Adam(self.discriminator.parameters(), lr=lr_D,  betas=(0.0, 0.9))
                
         self.clip_value = clip_value
+        self.TEMP_START = TEMP_START
+        self.TEMP_END = TEMP_END
+        self.TEMP_DECAY = 1000
         
         self.total_steps = 0
         self.RL_loss = []
@@ -933,7 +935,7 @@ class BigBird():
     
     def indicies2string(self, indices):
         inv_map = {v: k for k, v in self.dictionary.items()}
-        print([inv_map[i.item()] for i in indices])
+        return ' '.join([inv_map[i.item()] for i in indices])
         
     def train(self):
         self.generator.train()
@@ -957,6 +959,7 @@ class BigBird():
         self.fake_scores = loader['fake_scores']
         self.total_steps = loader['total_steps']
         self.epoch = loader['epoch']
+        self.gumbel_temperature = loader['gumbel_temperature']
     
     def save(self, save_path):
         print('lay egg to ./Nest ... save as', save_path)
@@ -970,6 +973,7 @@ class BigBird():
                     'fake_scores':self.fake_scores,
                     'total_steps':self.total_steps,
                     'epoch':self.epoch,
+                    'gumbel_temperature':self.gumbel_temperature
                     },save_path)
     
     def eval_iter(self, src, src_mask, max_len, real_data, ct, verbose = 1):
@@ -993,12 +997,18 @@ class BigBird():
                 print("")
             return acc, rewards.mean().item()
     
-    def run_iter(self, src, src_mask, max_len, real_data, writer, D_iters = 5, D_toggle = 'On', verbose = 1):
+    def plot_estimated_probs(samples,ylabel=''):
+        n_cats = np.max(samples)+1
+        estd_probs,_,_ = plt.hist(samples,bins=np.arange(n_cats+1),align='left',edgecolor='white')
+        plt.xlabel('Category')
+        plt.ylabel(ylabel+'Estimated probability')
+        return estd_probs
+    def run_iter(self, src, src_mask, max_len, real_data,  D_iters = 5, D_toggle = 'On', verbose = 1):
         #summary_logits have some problem
 
         
         #summary = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'])
-        summary_sample, summary_log_values, critic_values, summary_log_probs, gumbel_one_hot = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'])
+        summary_sample, summary_log_values, critic_values, summary_probs, gumbel_one_hot = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'])
         
         batch_D_loss = 0
         if(D_toggle == 'On'):
@@ -1019,13 +1029,16 @@ class BigBird():
         
         batch_G_loss = 0 
         if(D_toggle == 'On'):
-            #print(summary_log_probs.shape)
             #print(gumbel_one_hot.shape)
             batch_G_loss = self.train_G(gumbel_one_hot)          
         
+        self.gumbel_temperature = self.TEMP_END + (self.TEMP_START - self.TEMP_END) * math.exp(-1. * self.total_steps / self.TEMP_DECAY)
+        
         
         summary_mask = (summary_sample != self.dictionary['[SEP]']).type_as(summary_sample).unsqueeze(-2)
-        rec_loss, acc, out = self.reconstructor(gumbel_one_hot, summary_mask, src.shape[1], self.dictionary['[CLS]'], src, mode='sample')
+        rec_loss, acc, out = self.reconstructor(gumbel_one_hot, summary_mask, src.shape[1], self.dictionary['[CLS]'], src, mode='sample', temp = self.gumbel_temperature)
+        
+
         
         self.optimizer_R.zero_grad()
         #RL_loss = self.RL_scale * self.compute(rewards, summary_log_values, critic_values)
@@ -1055,24 +1068,31 @@ class BigBird():
             if not os.path.exists("./Nest"):
                 os.makedirs("./Nest")
             self.save("./Nest/NewbornBird_LSTM_GumbelSoftmax")
+
+            #for i in range(5):
+                #plt.plot(range(1000),summary_probs.cpu().detach().numpy()[0,i,:1000] )
+            #    wandb.log({"prob {}".format(i): wandb.Histogram(summary_probs.cpu().detach().numpy()[0,i,:1000])},step=step)
         
-        if verbose == 1 and self.total_steps % 1 == 0:
+        if verbose == 1 and self.total_steps % 100 == 0:
             print("origin:")
-            self.indicies2string(src[0])
+            print(self.indicies2string(src[0]))
             print("summary:")
-            self.indicies2string(summary_sample[0])
+            print(self.indicies2string(summary_sample[0]))
             print("real summary:")
-            self.indicies2string(real_data[0])
+            print(self.indicies2string(real_data[0]))
             print("reconsturct out:")
-            self.indicies2string(out[0])
+            print(self.indicies2string(out[0]))
 #             print("sentiment:",label[0].item())
 #             print("y:",sentiment_label[0].item())
 #            print("reward:",rewards[0].item())
+            
             print("")
         
         #for name, param in self.classifier.named_parameters():
         #    writer.add_histogram(name, param.clone().cpu().data.numpy(), self.total_steps)
-        return [rec_loss.item(), batch_G_loss, batch_D_loss], [real_score, fake_score, acc]
+        distrib = summary_probs.cpu().detach().numpy()[0,0,:200]
+        one_hot_out = gumbel_one_hot.cpu().detach().numpy()[0,0,:200]
+        return [rec_loss.item(), batch_G_loss, batch_D_loss], [real_score, fake_score, acc], [self.indicies2string(src[0]), self.indicies2string(summary_sample[0]), self.indicies2string(out[0])], distrib, one_hot_out
 
 class LSTMEncoder(nn.Module):    
     def __init__(self, vocab_sz, hidden_dim, padding_index):
@@ -1091,7 +1111,7 @@ class LSTMEncoder(nn.Module):
     
 
 class LSTM_Gumbel_Encoder_Decoder(nn.Module):
-    def __init__(self, hidden_dim, emb_dim, input_len, output_len, voc_size, critic_net, device, eps=1e-8):
+    def __init__(self, hidden_dim, emb_dim, input_len, output_len, voc_size, critic_net, device, eps=1e-8, num_layers = 2):
         super().__init__()
         
         self.hidden_dim = hidden_dim
@@ -1103,8 +1123,10 @@ class LSTM_Gumbel_Encoder_Decoder(nn.Module):
         #self.epsilon = eps
         
         self.emb_layer = nn.Embedding(voc_size, emb_dim)
-        self.encoder = nn.LSTM(emb_dim, hidden_dim, num_layers=1, batch_first=True, bidirectional=True)
-        self.decoder = nn.LSTM(emb_dim, hidden_dim*2, num_layers=1, batch_first=True)
+        self.num_layers = num_layers
+        
+        self.encoder = nn.LSTM(emb_dim, hidden_dim, num_layers=num_layers, batch_first=True, bidirectional=True)
+        self.decoder = nn.LSTM(emb_dim, hidden_dim*2, num_layers=num_layers, batch_first=True)
         
         self.critic_net = critic_net
         
@@ -1129,8 +1151,8 @@ class LSTM_Gumbel_Encoder_Decoder(nn.Module):
         memory, (h, c) = self.encoder(x_emb)
         h = h.transpose(0, 1).contiguous()
         c = c.transpose(0, 1).contiguous()
-        h = h.view(batch_size, 1, h.shape[-1]*2)
-        c = c.view(batch_size, 1, c.shape[-1]*2)
+        h = h.view(batch_size, self.num_layers, h.shape[-1]*2)
+        c = c.view(batch_size, self.num_layers, c.shape[-1]*2)
         h = h.transpose(0, 1).contiguous()
         c = c.transpose(0, 1).contiguous()        
 
@@ -1139,9 +1161,9 @@ class LSTM_Gumbel_Encoder_Decoder(nn.Module):
         out_h, out_c = (h, c)
         ys = torch.ones(batch_size, 1).fill_(start_symbol).type_as(x.data)
         
-        log_values = []
+        values = []
         critics = []
-        all_log_probs = []
+        all_probs = []
         gumbel_one_hots = []
         
         for i in range(max_len-1):
@@ -1154,9 +1176,9 @@ class LSTM_Gumbel_Encoder_Decoder(nn.Module):
             
             context_vector = torch.bmm(attention.view(batch_size, 1, input_len), memory)
             
-            feature = torch.cat((out, context_vector), -1).view(batch_size, -1)
+            logits = torch.cat((out, context_vector), -1).view(batch_size, -1)
             
-            one_hot, next_words, values, log_probs = self.gumbel_softmax(feature, temp)
+            one_hot, next_words, value, prob = self.gumbel_softmax(logits, temp)
             
 #             print(feature.shape)
 #             print(one_hot.shape)
@@ -1164,20 +1186,20 @@ class LSTM_Gumbel_Encoder_Decoder(nn.Module):
 #             print(values.shape)
 #             print(log_probs.shape)
 #             input("")
-            
+                
             ys = torch.cat((ys, next_words.view(batch_size, 1)), dim=1)
                  
-            log_values.append(values)
+            values.append(value)
             critics.append(critic)
-            all_log_probs.append(log_probs)
+            all_probs.append(prob)
             gumbel_one_hots.append(one_hot)
             
-        log_values = torch.stack(log_values,1)
+        values = torch.stack(values,1)
         critics = torch.stack(critics,1).squeeze(-1)
-        all_log_probs = torch.stack(all_log_probs,1)
+        all_probs = torch.stack(all_probs,1)
         gumbel_one_hots = torch.stack(gumbel_one_hots, 1)
         
-        return ys, log_values, critics, all_log_probs, gumbel_one_hots  
+        return ys, values, critics, all_probs, gumbel_one_hots  
     
     def sample_gumbel(self, shape, eps=1e-20):
         U = torch.rand(shape).to(self.device)
@@ -1186,8 +1208,8 @@ class LSTM_Gumbel_Encoder_Decoder(nn.Module):
     def gumbel_softmax_sample(self, logits, temperature):
         y = logits + self.sample_gumbel(logits.size())
         
-        #this return log prob, I guess it still works
-        return self.adaptive_softmax.log_prob(logits)
+        #the formula should be prob not logprob, I guess it still works
+        return self.adaptive_softmax.log_prob(logits).exp()
         #return F.softmax(y / temperature, dim=-1)
 
     def gumbel_softmax(self, logits, temperature):
@@ -1335,7 +1357,7 @@ class Classifier(nn.Module):
 #         return self.decoder(self.tgt_embed(tgt), memory, src_mask, tgt_mask)
 
 class LSTM_Normal_Encoder_Decoder(nn.Module):
-    def __init__(self, hidden_dim, emb_dim, input_len, output_len, voc_size, pad_index, device, eps=1e-8):
+    def __init__(self, hidden_dim, emb_dim, input_len, output_len, voc_size, pad_index, device, eps=1e-8, num_layers = 2):
         super().__init__()
         
         self.hidden_dim = hidden_dim
@@ -1348,10 +1370,12 @@ class LSTM_Normal_Encoder_Decoder(nn.Module):
         #self.teacher_prob = 1.
         #self.epsilon = eps
         
+        self.num_layers = num_layers
+        
         #self.emb_layer = nn.Embedding(voc_size, emb_dim)
         self.disguise_embed = nn.Linear(voc_size, emb_dim)
-        self.encoder = nn.LSTM(emb_dim, hidden_dim, num_layers=1, batch_first=True, bidirectional=True)
-        self.decoder = nn.LSTM(emb_dim, hidden_dim*2, num_layers=1, batch_first=True)
+        self.encoder = nn.LSTM(emb_dim, hidden_dim, num_layers=num_layers, batch_first=True, bidirectional=True)
+        self.decoder = nn.LSTM(emb_dim, hidden_dim*2, num_layers=num_layers, batch_first=True)
         
         self.attention_softmax = nn.Softmax(dim=1)
         self.vocab_sz = voc_size
@@ -1374,8 +1398,8 @@ class LSTM_Normal_Encoder_Decoder(nn.Module):
         memory, (h, c) = self.encoder(x_emb)
         h = h.transpose(0, 1).contiguous()
         c = c.transpose(0, 1).contiguous()
-        h = h.view(batch_size, 1, h.shape[-1]*2)
-        c = c.view(batch_size, 1, c.shape[-1]*2)
+        h = h.view(batch_size, self.num_layers, h.shape[-1]*2)
+        c = c.view(batch_size, self.num_layers, c.shape[-1]*2)
         h = h.transpose(0, 1).contiguous()
         c = c.transpose(0, 1).contiguous()        
 
