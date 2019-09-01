@@ -239,7 +239,7 @@ class BigBird():
         
         self.optimizer_R.zero_grad()
         rec_loss.backward()
-        #nn.utils.clip_grad_norm_(list(self.generator.parameters()) + list(self.reconstructor.parameters()), 0.5)
+        nn.utils.clip_grad_norm_(list(self.generator.parameters()) + list(self.reconstructor.parameters()), 0.5)
         self.optimizer_R.step()
         
         
