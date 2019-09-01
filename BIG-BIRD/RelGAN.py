@@ -178,6 +178,10 @@ class BigBird():
         NNcriterion = nn.NLLLoss().to(self.device)
         batch_G_loss = NNcriterion(summary_probs.log().contiguous().view(batch_size * max_len, -1), real_data.contiguous().view(-1))
         
+        self.optimizer_G.zero_grad()
+        batch_G_loss.backward()
+        self.optimizer_G.step()
+        
         self.total_steps += 1
         
         if self.total_steps % 500 == 0:
@@ -197,7 +201,7 @@ class BigBird():
         one_hot_out = gumbel_one_hot[0,0, :100].cpu().detach().numpy()
         return [batch_G_loss, 0], [0], [0, 0, 0], [self.indicies2string(src[0]), self.indicies2string(summary_sample[0]), 0], distrib, one_hot_out
         
-    def run_iter(self, src, src_mask, max_len, real_data,  D_iters = 5, D_toggle = 'On', verbose = 1):
+    def run_iter(self, src, src_mask, max_len, real_data,  D_iters = 5, D_toggle = 'On', verbose = 1, writer = None):
         #summary_logits have some problem
 
         
@@ -239,7 +243,7 @@ class BigBird():
         
         self.optimizer_R.zero_grad()
         rec_loss.backward()
-        nn.utils.clip_grad_norm_(list(self.generator.parameters()) + list(self.reconstructor.parameters()), 0.5)
+        nn.utils.clip_grad_norm_(list(self.generator.parameters()) + list(self.reconstructor.parameters()), 0.1)
         self.optimizer_R.step()
         
         
@@ -269,8 +273,11 @@ class BigBird():
             
             print("")
         
-        #for name, param in self.classifier.named_parameters():
-        #    writer.add_histogram(name, param.clone().cpu().data.numpy(), self.total_steps)
+#         for name, param in self.generator.named_parameters():
+#             writer.add_histogram(name, param.clone().cpu().data.numpy(), self.total_steps)
+            
+#         for name, param in self.reconstructor.named_parameters():
+#             writer.add_histogram(name, param.clone().cpu().data.numpy(), self.total_steps)    
         distrib = summary_probs.cpu().detach().numpy()[0,0, :100]
         one_hot_out = gumbel_one_hot.cpu().detach().numpy()[0,0, :100]
         return [batch_G_loss, batch_D_loss], [CE_loss.item()], [real_score, fake_score, acc], [self.indicies2string(src[0]), self.indicies2string(summary_sample[0]), self.indicies2string(out[0])], distrib, one_hot_out
