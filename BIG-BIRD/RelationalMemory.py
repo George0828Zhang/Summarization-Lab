@@ -3,6 +3,7 @@ from torch import nn
 import torch.nn.functional as F
 import numpy as np
 from torch.autograd import Variable
+from nearest_embed import NearestEmbed
 
 # this class largely follows the official sonnet implementation
 # https://github.com/deepmind/sonnet/blob/master/sonnet/python/modules/relational_memory.py
@@ -36,11 +37,15 @@ class RelationalMemory(nn.Module):
       ValueError: attention_mlp_layers is < 1.
     """
 
-    def __init__(self, mem_slots, head_size, input_size, num_tokens, device, num_heads=1, num_blocks=1, forget_bias=1.,
-                 input_bias=0.,
+    def __init__(self, mem_slots, head_size, input_size, num_tokens, device, k = 1024, num_heads=1, num_blocks=1, forget_bias=1.,
+                 input_bias=0., 
                  gate_style='unit', attention_mlp_layers=2, key_size=None, use_adaptive_softmax=False, cutoffs=None):
         super(RelationalMemory, self).__init__()
-
+        
+        ########## add for reconstruct #################
+        self.near_emb = NearestEmbed(k, num_tokens)
+        self.to_small_emb_dim = nn.Linear(num_tokens, input_size)
+        
         ########## generic parameters for RMC ##########
         self.mem_slots = mem_slots
         self.head_size = head_size
@@ -297,7 +302,7 @@ class RelationalMemory(nn.Module):
 
         return memory
 
-    def forward_step(self, inputs, memory, treat_input_as_matrix=False):
+    def forward_step(self, inputs, memory, already_embed = False, treat_input_as_matrix=False):
         """
         Forward step of the relational memory core.
         Args:
@@ -312,7 +317,10 @@ class RelationalMemory(nn.Module):
         """
 
         # first embed the tokens into vectors
-        inputs_embed = self.dropout(self.token_to_input_encoder(inputs))
+        if already_embed == False:
+            inputs_embed = self.dropout(self.token_to_input_encoder(inputs))
+        else:
+            inputs_embed = inputs
 
         if treat_input_as_matrix:
             # keep (Batch, Seq, ...) dim (0, 1), flatten starting from dim 2
@@ -355,7 +363,7 @@ class RelationalMemory(nn.Module):
 
         return logit, next_memory
 
-    def forward(self, inputs, memory, start_symbol, temperature = 2.0, require_logits=False):
+    def forward(self, inputs, max_len, memory, start_symbol, temperature = 2.0, require_logits=False):
         # Starting each batch, we detach the hidden state from how it was previously produced.
         # If we didn't, the model would try backpropagating all the way to start of the dataset.
         memory = self.repackage_hidden(memory)
@@ -374,7 +382,7 @@ class RelationalMemory(nn.Module):
         ys = torch.ones(batch_size, 1).fill_(start_symbol).type_as(inputs)
         
         # shape[1] is seq_lenth T
-        for idx_step in range(inputs.shape[1]):
+        for idx_step in range(max_len):
             logit, memory = self.forward_step(inputs[:, idx_step], memory)
             one_hot, next_words, value, prob = self.gumbel_softmax(logit, temperature)
             ys = torch.cat((ys, next_words.view(batch_size, 1)), dim=1)
@@ -387,7 +395,61 @@ class RelationalMemory(nn.Module):
         gumbel_one_hots = torch.stack(gumbel_one_hots, 1)
 
         return ys, values, all_probs, gumbel_one_hots  
+    def _to_one_hot(self, y, n_dims):
+
+        scatter_dim = len(y.size())
+
+        y_tensor = y.to(self.device).long().view(*y.size(), -1)
+        zeros = torch.zeros(*y.size(), n_dims).to(self.device)
+
+        return zeros.scatter(scatter_dim, y_tensor, 1) 
+    
+    def reconstruct_forward(self, inputs, y, memory, start_symbol):
+        memory = self.repackage_hidden(memory)
+
+        # for loop implementation of (entire) recurrent forward pass of the model
+        # inputs is batch first [batch, seq], and output logit per step is [batch, vocab]
+        # so the concatenated logits are [seq * batch, vocab]
+
+        # targets are flattened [seq, batch] => [seq * batch], so the dimension is correct
+        values = []
+        all_probs = []
         
+        batch_size = inputs.shape[0]
+        
+        ones = self._to_one_hot(torch.ones(batch_size, 1).fill_(start_symbol).type_as(inputs), inputs.shape[-1])
+        inputs = torch.cat([ones, inputs], 1)
+        
+        # shape[1] is seq_lenth T
+        
+        #chosen_emb = []
+        
+        for idx_step in range(inputs.shape[1]):
+            #z_q, _ = self.near_emb(inputs[:, idx_step], weight_sg = True)
+            z_q_small = self.to_small_emb_dim(inputs[:, idx_step])
+            _, memory = self.forward_step(z_q_small, memory, already_embed = True)
+            #chosen_emb.append(z_q)
+        
+        #chosen_emb = torch.stack(chosen_emb, 1)
+            
+        logits = []
+        for idx_step in range(y.shape[1]):
+            logit, memory = self.forward_step(y[:, idx_step], memory)
+            logits.append(logit)
+        
+        logits = torch.stack(logits,1)
+        max_len = y.shape[1]
+        
+        _ , CEloss = self.criterion_adaptive(logits[:,:-1].contiguous().view(batch_size * (max_len - 1), -1), y[:,1:].contiguous().view(batch_size * (max_len-1)))
+        
+        #y from one to get rid of [CLS]
+        log_argmaxs = self.criterion_adaptive.predict(logits[:,:-1].contiguous().view(batch_size * (max_len - 1), -1)).view(batch_size, max_len-1)
+        acc = ( log_argmaxs== y[:,1:]).float().mean()
+        
+        #vq_loss = F.mse_loss(chosen_emb, inputs.detach())
+        #commit_loss = F.mse_loss(inputs, chosen_emb.detach())
+        
+        return CEloss, acc, log_argmaxs 
         
     def sample_gumbel(self, shape, eps=1e-20):
         U = torch.rand(shape).to(self.device)
