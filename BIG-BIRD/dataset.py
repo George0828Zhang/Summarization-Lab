@@ -111,7 +111,7 @@ class Loader(object):
                     
     def __iter__(self):
         if self.shuffle:            
-            r = list(range(1000))
+            r = list(range(self.total))
             random.shuffle(r)
             self.iters = iter(r)
         else:
