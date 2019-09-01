@@ -468,7 +468,7 @@ class RelationalMemory(nn.Module):
         if not self.use_adaptive_softmax:
             return F.softmax(y / temperature, dim=-1)
         else:
-            return self.criterion_adaptive.log_prob(logits).exp()
+            return self.criterion_adaptive.log_prob(y / temperature).exp()
 
     def gumbel_softmax(self, logits, temperature):
         """
