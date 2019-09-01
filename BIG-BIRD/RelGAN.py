@@ -165,34 +165,18 @@ class BigBird():
                 
             return acc, rewards.mean().item()   
     
-    def pretrainGAN_run_iter(self, src, src_mask, max_len, real_data,  D_iters = 5, D_toggle = 'On', verbose = 0):
+    def pretrainGAN_run_iter(self, src, src_mask, max_len, real_data,  D_iters = 5, D_toggle = 'On', verbose = 1):
         
         batch_size = src.shape[0]
         memory = self.generator.initial_state(batch_size, trainable=True).to(self.device)
         self.gumbel_temperature = max(self.TEMP_END, math.exp(-1e-4*self.total_steps))
         summary_sample, summary_log_values, summary_probs, gumbel_one_hot = self.generator(src, max_len, memory, self.dictionary['[CLS]'], temperature = self.gumbel_temperature)
         
-        batch_D_loss = 0
-        if(D_toggle == 'On'):
-            for i in range(D_iters):
-                self.optimizer_D.zero_grad()
-                
-                batch_d_loss, real_score, fake_score = self.train_D(gumbel_one_hot, self._to_one_hot(real_data, len(self.dictionary)))
-                batch_D_loss += batch_d_loss
-                batch_d_loss.backward(retain_graph=True);
-
-                #Clip critic weights
-                for p in self.discriminator.parameters():
-                    p.data.clamp_(-self.clip_value, self.clip_value)
-        
-            self.optimizer_D.step();
-        
-        batch_D_loss = batch_D_loss.item()/D_iters
-        
         batch_G_loss = 0 
-        if(D_toggle == 'On'):
-            #print(gumbel_one_hot.shape)
-            batch_G_loss = self.train_G(gumbel_one_hot)          
+
+            
+        NNcriterion = nn.NLLLoss().to(self.device)
+        batch_G_loss = NNcriterion(summary_probs.log().contiguous().view(batch_size * max_len, -1), real_data.contiguous().view(-1))
         
         self.total_steps += 1
         
@@ -209,10 +193,9 @@ class BigBird():
                 print("real summary:")
                 print(self.indicies2string(real_data[0]))
                 print("")
-        print(summary_probs.shape)
         distrib = summary_probs[0,0, :100].cpu().detach().numpy()
         one_hot_out = gumbel_one_hot[0,0, :100].cpu().detach().numpy()
-        return [0 , batch_G_loss, batch_D_loss], [real_score, fake_score, 0], [self.indicies2string(src[0]), self.indicies2string(summary_sample[0]), 0], distrib, one_hot_out
+        return [batch_G_loss, 0], [0], [0, 0, 0], [self.indicies2string(src[0]), self.indicies2string(summary_sample[0]), 0], distrib, one_hot_out
         
     def run_iter(self, src, src_mask, max_len, real_data,  D_iters = 5, D_toggle = 'On', verbose = 1):
         #summary_logits have some problem
