@@ -382,8 +382,13 @@ class RelationalMemory(nn.Module):
         ys = torch.ones(batch_size, 1).fill_(start_symbol).type_as(inputs)
         
         # shape[1] is seq_lenth T
+        for idx_step in range(inputs.shape[1]):
+            _, memory = self.forward_step(inputs[:, idx_step], memory)
+            
+        
+        
         for idx_step in range(max_len):
-            logit, memory = self.forward_step(inputs[:, idx_step], memory)
+            logit, memory = self.forward_step(ys[:, -1], memory)
             one_hot, next_words, value, prob = self.gumbel_softmax(logit, temperature)
             ys = torch.cat((ys, next_words.view(batch_size, 1)), dim=1)
             values.append(value)
