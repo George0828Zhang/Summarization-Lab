@@ -7,14 +7,13 @@ from torch.autograd import Variable
 import matplotlib.pyplot as plt
 import os
 import torch.autograd as autograd
-import wandb
 from RelationalMemory import *
 from Transformer import *
 
 
 class BigBird():
     #generator is translator here
-    def __init__(self, generator, discriminator, reconstructor, dictionary, gamma = 0.99, clip_value = 0.1, lr_G = 5e-5, lr_D = 5e-5, lr_R = 1e-4, LAMBDA = 10,  TEMP_END = 0.5, device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
+    def __init__(self, generator, discriminator, reconstructor, dictionary, gamma = 0.99, clip_value = 0.1, lr_G = 5e-5, lr_D = 5e-5, lr_R = 1e-4, LAMBDA = 10,  TEMP_END = 0.5, vq_coef =0.8, device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
         super(BigBird, self).__init__()
         
         self.device = device
@@ -47,12 +46,8 @@ class BigBird():
         self.lr_R = lr_R
         
         self.total_steps = 0
-        self.RL_loss = []
-        self.batch_G_losses = []
-        self.batch_D_losses=[] 
-        self.real_scores = []
-        self.fake_scores = []
-        self.all_rewards = []
+
+        self.vq_coef = 0.8
         
         self.epoch = 0
         
@@ -137,10 +132,6 @@ class BigBird():
         self.generator.load_state_dict(loader['generator'])
         self.discriminator.load_state_dict(loader['discriminator'])
         self.reconstructor.load_state_dict(loader['reconstructor'])
-        self.batch_G_losses = loader['batch_G_losses']
-        self.batch_D_losses = loader['batch_D_losses']
-        self.real_scores = loader['real_scores']
-        self.fake_scores = loader['fake_scores']
         self.total_steps = loader['total_steps']
         self.epoch = loader['epoch']
         self.gumbel_temperature = loader['gumbel_temperature']
@@ -151,10 +142,6 @@ class BigBird():
         torch.save({'generator':self.generator.state_dict(), 
                     'reconstructor':self.reconstructor.state_dict(), 
                     'discriminator':self.discriminator.state_dict(),
-                    'batch_G_losses':self.batch_G_losses,
-                    'batch_D_losses':self.batch_D_losses,
-                    'real_scores':self.real_scores,
-                    'fake_scores':self.fake_scores,
                     'total_steps':self.total_steps,
                     'epoch':self.epoch,
                     'gumbel_temperature':self.gumbel_temperature
@@ -167,22 +154,23 @@ class BigBird():
             rewards, acc, out = self.reconstructor(gumbel_one_hot, summary_mask, src.shape[1], self.dictionary['[CLS]'], src)
             if verbose == 1 and ct % 100 == 0:
                 print("origin:")
-                self.indicies2string(src[0])
+                print(self.indicies2string(src[0]))
                 print("summary:")
-                self.indicies2string(summary_sample[0])
+                print(self.indicies2string(summary_sample[0]))
                 print("real summary:")
-                self.indicies2string(real_data[0])
+                print(self.indicies2string(real_data[0]))
                 print("reconsturct out:")
-                self.indicies2string(out[0])
+                print(self.indicies2string(out[0]))
                 print("")
                 
             return acc, rewards.mean().item()   
     
     def pretrainGAN_run_iter(self, src, src_mask, max_len, real_data,  D_iters = 5, D_toggle = 'On', verbose = 0):
+        
         batch_size = src.shape[0]
         memory = self.generator.initial_state(batch_size, trainable=True).to(self.device)
         self.gumbel_temperature = max(self.TEMP_END, math.exp(-1e-4*self.total_steps))
-        summary_sample, summary_log_values, summary_probs, gumbel_one_hot = self.generator(src, memory, self.dictionary['[CLS]'], temperature = self.gumbel_temperature)
+        summary_sample, summary_log_values, summary_probs, gumbel_one_hot = self.generator(src, max_len, memory, self.dictionary['[CLS]'], temperature = self.gumbel_temperature)
         
         batch_D_loss = 0
         if(D_toggle == 'On'):
@@ -206,7 +194,6 @@ class BigBird():
             #print(gumbel_one_hot.shape)
             batch_G_loss = self.train_G(gumbel_one_hot)          
         
-        self.gumbel_temperature = max(self.TEMP_END, math.exp(-1e-4*self.total_steps))
         self.total_steps += 1
         
         if self.total_steps % 500 == 0:
@@ -214,8 +201,17 @@ class BigBird():
                 os.makedirs("./Nest")
             self.save("./Nest/Pretrain_RelGAN")
 
-        distrib = summary_probs.cpu().detach().numpy()[0,0, :100]
-        one_hot_out = gumbel_one_hot.cpu().detach().numpy()[0,0, :100]
+        if verbose == 1 and self.total_steps % 1000 == 0:
+                print("origin:")
+                print(self.indicies2string(src[0]))
+                print("summary:")
+                print(self.indicies2string(summary_sample[0]))
+                print("real summary:")
+                print(self.indicies2string(real_data[0]))
+                print("")
+        print(summary_probs.shape)
+        distrib = summary_probs[0,0, :100].cpu().detach().numpy()
+        one_hot_out = gumbel_one_hot[0,0, :100].cpu().detach().numpy()
         return [0 , batch_G_loss, batch_D_loss], [real_score, fake_score, 0], [self.indicies2string(src[0]), self.indicies2string(summary_sample[0]), 0], distrib, one_hot_out
         
     def run_iter(self, src, src_mask, max_len, real_data,  D_iters = 5, D_toggle = 'On', verbose = 1):
@@ -226,7 +222,7 @@ class BigBird():
         batch_size = src.shape[0]
         memory = self.generator.initial_state(batch_size, trainable=True).to(self.device)
         self.gumbel_temperature = max(self.TEMP_END, math.exp(-1e-4*self.total_steps))
-        summary_sample, summary_log_values, summary_probs, gumbel_one_hot = self.generator(src, memory, self.dictionary['[CLS]'], temperature = self.gumbel_temperature)
+        summary_sample, summary_log_values, summary_probs, gumbel_one_hot = self.generator(src, max_len, memory, self.dictionary['[CLS]'], temperature = self.gumbel_temperature)
         
         batch_D_loss = 0
         if(D_toggle == 'On'):
@@ -253,39 +249,23 @@ class BigBird():
         self.gumbel_temperature = max(self.TEMP_END, math.exp(-1e-4*self.total_steps))
         
         
-        summary_mask = (summary_sample != self.dictionary['[SEP]']).type_as(summary_sample).unsqueeze(-2)
-        rec_loss, acc, out = self.reconstructor(gumbel_one_hot, summary_mask, src.shape[1], self.dictionary['[CLS]'], src, mode='sample')
-        
+        memory = self.reconstructor.initial_state(batch_size, trainable=True).to(self.device)
+        CE_loss, acc, out = self.reconstructor.reconstruct_forward(gumbel_one_hot, src, memory, self.dictionary['[CLS]'])
 
+        rec_loss = CE_loss #+ self.vq_coef * vq_loss + 0.25 * self.vq_coef * commit_loss
         
         self.optimizer_R.zero_grad()
-        #RL_loss = self.RL_scale * self.compute(rewards, summary_log_values, critic_values)
-        #RL_loss.backward()
         rec_loss.backward()
         #nn.utils.clip_grad_norm_(list(self.generator.parameters()) + list(self.reconstructor.parameters()), 0.5)
         self.optimizer_R.step()
         
-        """
-        #assert type(summary_logits) is not list
-        rewards, acc, label = self.classifier(summary_sample, sentiment_label, self.dictionary['[SEP]'])      
-        self.optimizer_C.zero_grad()
-        RL_loss = self.RL_scale * self.compute(rewards, summary_log_values, critic_values)
-        RL_loss.backward()
-        nn.utils.clip_grad_norm_(list(self.generator.parameters()) + list(self.classifier.parameters()), 0.5)
-        self.optimizer_C.step()
-        """
-        
-        self.batch_G_losses.append(batch_G_loss)
-        self.batch_D_losses.append(batch_D_loss)
-        self.real_scores.append(real_score)
-        self.fake_scores.append(fake_score)
         
         self.total_steps += 1
         
         if self.total_steps % 500 == 0:
             if not os.path.exists("./Nest"):
                 os.makedirs("./Nest")
-            self.save("./Nest/NewbornBird_RelGAN")
+            self.save("./Nest/DoubleRelationMEM_GAN")
 
             #for i in range(5):
                 #plt.plot(range(1000),summary_probs.cpu().detach().numpy()[0,i,:1000] )
@@ -310,7 +290,7 @@ class BigBird():
         #    writer.add_histogram(name, param.clone().cpu().data.numpy(), self.total_steps)
         distrib = summary_probs.cpu().detach().numpy()[0,0, :100]
         one_hot_out = gumbel_one_hot.cpu().detach().numpy()[0,0, :100]
-        return [rec_loss.item(), batch_G_loss, batch_D_loss], [real_score, fake_score, acc], [self.indicies2string(src[0]), self.indicies2string(summary_sample[0]), self.indicies2string(out[0])], distrib, one_hot_out
+        return [batch_G_loss, batch_D_loss], [CE_loss.item()], [real_score, fake_score, acc], [self.indicies2string(src[0]), self.indicies2string(summary_sample[0]), self.indicies2string(out[0])], distrib, one_hot_out
 
 class LSTMEncoder(nn.Module):    
     def __init__(self, vocab_sz, hidden_dim, padding_index):
@@ -439,96 +419,98 @@ class LSTMEncoder(nn.Module):
 #         y_hard = (y_hard - y).detach() + y
 #         return y_hard.view(logits.shape[0], -1), ind, values, y    
 
-class LSTM_Normal_Encoder_Decoder(nn.Module):
-    def __init__(self, hidden_dim, emb_dim, input_len, output_len, voc_size, pad_index, device, eps=1e-8, num_layers = 2):
-        super().__init__()
+# class LSTM_Normal_Encoder_Decoder(nn.Module):
+#     def __init__(self, hidden_dim, emb_dim, input_len, output_len, voc_size, pad_index, device, eps=1e-8, num_layers = 2):
+#         super().__init__()
         
-        self.hidden_dim = hidden_dim
-        self.emb_dim = emb_dim
-        self.device = device
+#         self.hidden_dim = hidden_dim
+#         self.emb_dim = emb_dim
+#         self.device = device
           
-        #self.input_len = input_len
-        #self.output_len = output_len
-        #self.voc_size = voc_size
-        #self.teacher_prob = 1.
-        #self.epsilon = eps
+#         #self.input_len = input_len
+#         #self.output_len = output_len
+#         #self.voc_size = voc_size
+#         #self.teacher_prob = 1.
+#         #self.epsilon = eps
         
-        self.num_layers = num_layers
+#         self.num_layers = num_layers
         
-        #self.emb_layer = nn.Embedding(voc_size, emb_dim)
-        self.disguise_embed = nn.Linear(voc_size, emb_dim)
-        self.encoder = nn.LSTM(emb_dim, hidden_dim, num_layers=num_layers, batch_first=True, bidirectional=True)
-        self.decoder = nn.LSTM(emb_dim, hidden_dim*2, num_layers=num_layers, batch_first=True)
+#         #self.emb_layer = nn.Embedding(voc_size, emb_dim)
+#         self.disguise_embed = nn.Linear(voc_size, emb_dim)
+#         self.encoder = nn.LSTM(emb_dim, hidden_dim, num_layers=num_layers, batch_first=True, bidirectional=True)
+#         self.decoder = nn.LSTM(emb_dim, hidden_dim*2, num_layers=num_layers, batch_first=True)
         
-        self.attention_softmax = nn.Softmax(dim=1)
-        self.vocab_sz = voc_size
+#         self.attention_softmax = nn.Softmax(dim=1)
+#         self.vocab_sz = voc_size
         
 
-        self.criterion = torch.nn.AdaptiveLogSoftmaxWithLoss(hidden_dim*4, voc_size, [1000, 5000, 20000], div_value=4.0, head_bias=False)
+#         self.criterion = torch.nn.AdaptiveLogSoftmaxWithLoss(hidden_dim*4, voc_size, [1000, 5000, 20000], div_value=4.0, head_bias=False)
         
-    def forward(self, x, src_mask, max_len, start_symbol, y, mode = 'argmax', temp = 2.0):
+#     def forward(self, x, src_mask, max_len, start_symbol, y, mode = 'argmax', temp = 2.0):
         
-        batch_size = x.shape[0]
-        input_len = x.shape[1]
-        device = x.device
+#         batch_size = x.shape[0]
+#         input_len = x.shape[1]
+#         device = x.device
         
-        # encoder
-        x_emb = self.disguise_embed(x)
-        memory, (h, c) = self.encoder(x_emb)
-        h = h.transpose(0, 1).contiguous()
-        c = c.transpose(0, 1).contiguous()
-        h = h.view(batch_size, self.num_layers, h.shape[-1]*2)
-        c = c.view(batch_size, self.num_layers, c.shape[-1]*2)
-        h = h.transpose(0, 1).contiguous()
-        c = c.transpose(0, 1).contiguous()        
+#         # encoder
+#         x_emb = self.disguise_embed(x)
+#         memory, (h, c) = self.encoder(x_emb)
+#         h = h.transpose(0, 1).contiguous()
+#         c = c.transpose(0, 1).contiguous()
+#         h = h.view(batch_size, self.num_layers, h.shape[-1]*2)
+#         c = c.view(batch_size, self.num_layers, c.shape[-1]*2)
+#         h = h.transpose(0, 1).contiguous()
+#         c = c.transpose(0, 1).contiguous()        
 
         
-        ## decoder
-        out_h, out_c = (h, c)
+#         ## decoder
+#         out_h, out_c = (h, c)
         
-        logits = []
-        for i in range(max_len):
-            ans_emb = self.disguise_embed(self._to_one_hot(y[:,i], self.vocab_sz)).view(batch_size, 1, self.emb_dim)
-            out, (out_h, out_c) = self.decoder(ans_emb, (out_h, out_c))
-            attention = torch.bmm(memory, out.transpose(1, 2)).view(batch_size, input_len)
-            attention = self.attention_softmax(attention)            
+#         logits = []
+       
+        
+#         for i in range(max_len):
+#             ans_emb = self.disguise_embed(self._to_one_hot(y[:,i], self.vocab_sz)).view(batch_size, 1, self.emb_dim)
+#             out, (out_h, out_c) = self.decoder(ans_emb, (out_h, out_c))
+#             attention = torch.bmm(memory, out.transpose(1, 2)).view(batch_size, input_len)
+#             attention = self.attention_softmax(attention)            
             
-            context_vector = torch.bmm(attention.view(batch_size, 1, input_len), memory)
+#             context_vector = torch.bmm(attention.view(batch_size, 1, input_len), memory)
             
-            logit = torch.cat((out, context_vector), -1).view(batch_size, -1)
-
+#             logit = torch.cat((out, context_vector), -1).view(batch_size, -1)
             
-#             if mode == 'argmax':
-#                 values, next_words = torch.max(log_probs, dim=-1, keepdim=True)
-#             if mode == 'sample':
-#                 m = torch.distributions.Categorical(logits=log_probs)
-#                 next_words = m.sample()
-#                 values = m.log_prob(next_words)
-           
-            logits.append(logit)
+            
+# #             if mode == 'argmax':
+# #                 values, next_words = torch.max(log_probs, dim=-1, keepdim=True)
+# #             if mode == 'sample':
+# #                 m = torch.distributions.Categorical(logits=log_probs)
+# #                 next_words = m.sample()
+# #                 values = m.log_prob(next_words)
+             
+#             logits.append(logit)
                 
-        logits = torch.stack(logits, 1)
+#         logits = torch.stack(logits, 1)
         
 
         
         
-        _ ,loss = self.criterion(logits[:,:-1].contiguous().view(batch_size * (max_len - 1), -1), y[:,1:].contiguous().view(batch_size * (max_len-1)))
+#         _ ,loss = self.criterion(logits[:,:-1].contiguous().view(batch_size * (max_len - 1), -1), y[:,1:].contiguous().view(batch_size * (max_len-1)))
         
-        #y from one to get rid of [CLS]
-        log_argmaxs = self.criterion.predict(logits[:,:-1].contiguous().view(batch_size * (max_len - 1), -1)).view(batch_size, max_len-1)
-        acc = ( log_argmaxs== y[:,1:]).float().mean()
+#         #y from one to get rid of [CLS]
+#         log_argmaxs = self.criterion.predict(logits[:,:-1].contiguous().view(batch_size * (max_len - 1), -1)).view(batch_size, max_len-1)
+#         acc = ( log_argmaxs== y[:,1:]).float().mean()
 
         
-        return loss, acc, log_argmaxs   
+#         return loss, acc, log_argmaxs   
     
-    def _to_one_hot(self, y, n_dims):
+#     def _to_one_hot(self, y, n_dims):
 
-        scatter_dim = len(y.size())
+#         scatter_dim = len(y.size())
 
-        y_tensor = y.to(self.device).long().view(*y.size(), -1)
-        zeros = torch.zeros(*y.size(), n_dims).to(self.device)
+#         y_tensor = y.to(self.device).long().view(*y.size(), -1)
+#         zeros = torch.zeros(*y.size(), n_dims).to(self.device)
 
-        return zeros.scatter(scatter_dim, y_tensor, 1)
+#         return zeros.scatter(scatter_dim, y_tensor, 1)
     
 
 class Discriminator(nn.Module):
