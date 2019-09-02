@@ -149,10 +149,13 @@ class BigBird():
     
     def eval_iter(self, src, src_mask, max_len, real_data, ct, verbose = 1):
         with torch.no_grad():
-            summary_sample, summary_log_values, critic_values, summary_log_probs, gumbel_one_hot = self.generator(src, src_mask, max_len, self.dictionary['[CLS]'], mode = 'sample')
-            summary_mask = (summary_sample != self.dictionary['[SEP]']).type_as(summary_sample).unsqueeze(-2)
-            rewards, acc, out = self.reconstructor(gumbel_one_hot, summary_mask, src.shape[1], self.dictionary['[CLS]'], src)
-            if verbose == 1 and ct % 100 == 0:
+            batch_size = src.shape[0]
+            memory = self.generator.initial_state(batch_size, trainable=True).to(self.device)
+            summary_sample, summary_log_values, summary_probs, gumbel_one_hot = self.generator(src, max_len, memory, self.dictionary['[CLS]'], temperature = self.gumbel_temperature)
+            
+            memory = self.reconstructor.initial_state(batch_size, trainable=True).to(self.device)
+            CE_loss, acc, out = self.reconstructor.reconstruct_forward(gumbel_one_hot, src, memory, self.dictionary['[CLS]'])
+            if verbose == 1 and ct % 1 == 0:
                 print("origin:")
                 print(self.indicies2string(src[0]))
                 print("summary:")
@@ -163,7 +166,7 @@ class BigBird():
                 print(self.indicies2string(out[0]))
                 print("")
                 
-            return acc, rewards.mean().item()   
+            return acc, CE_loss.item()
     
     def pretrainGAN_run_iter(self, src, src_mask, max_len, real_data,  D_iters = 5, D_toggle = 'On', verbose = 1):
         
